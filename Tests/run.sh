@@ -93,6 +93,46 @@ else
   print "skip LibreOffice tests (not installed)"
 fi
 
+print "— Damaged, disguised and encrypted documents"
+head -c 2000 /dev/urandom > junk.docx; out=$(conv txt "$PWD/junk.docx")
+check "damaged docx → clear error, no garbage" '[[ $out == *"isn'"'"'t a valid .docx"* && ! -e junk.txt ]]'
+printf '{\\rtf1 hello}' > disguised.doc; conv txt "$PWD/disguised.doc" >/dev/null
+check "RTF saved as .doc still converts" '[[ $(cat disguised.txt) == hello ]]'
+if [[ -x /Applications/LibreOffice.app/Contents/MacOS/soffice ]]; then
+  # Encrypt with a LibreOffice macro (its bundled Python can only run inside LibreOffice).
+  SO=/Applications/LibreOffice.app/Contents/MacOS/soffice; P=$W/lo-enc
+  $SO -env:UserInstallation=file://$P --headless --terminate_after_init >/dev/null 2>&1
+  mkdir -p $P/user/Scripts/python && cat > $P/user/Scripts/python/enc.py <<'PY'
+import os, uno
+from com.sun.star.beans import PropertyValue
+def P(n, v):
+    p = PropertyValue(); p.Name = n; p.Value = v; return p
+def main(*args):
+    desk = XSCRIPTCONTEXT.getDesktop(); base = os.environ["QC_DIR"]
+    for src, dst, flt in [("memo.txt", "locked.docx", "MS Word 2007 XML"), ("sheet.csv", "locked.xlsx", "Calc MS Excel 2007 XML"), ("memo.txt", "locked.odt", "writer8")]:
+        d = desk.loadComponentFromURL(uno.systemPathToFileUrl(os.path.join(base, src)), "_blank", 0, (P("Hidden", True),))
+        d.storeToURL(uno.systemPathToFileUrl(os.path.join(base, dst)), (P("FilterName", flt), P("Password", "pw")))
+        d.close(True)
+    desk.terminate()
+PY
+  QC_DIR=$PWD $SO -env:UserInstallation=file://$P --headless 'vnd.sun.star.script:enc.py$main?language=Python&location=user' >/dev/null 2>&1
+  out=$(conv txt "$PWD/locked.docx"); check "encrypted docx → txt: 'password-protected'"    '[[ $out == *"password-protected"* && ! -e locked.txt ]]'
+  out=$(conv pdf "$PWD/locked.docx"); check "encrypted docx → pdf: clear error, fast"       '[[ $out == *"may be password-protected"* && ! -e locked.pdf ]]'
+  out=$(conv csv "$PWD/locked.xlsx"); check "encrypted xlsx → csv: clear error"             '[[ $out == *"may be password-protected"* && ! -e locked.csv ]]'
+  out=$(conv rtf "$PWD/locked.odt");  check "encrypted odt → rtf: clear error"              '[[ $out == *"may be password-protected"* && ! -e locked.rtf ]]'
+fi
+if ls -d /Applications/Keynote*.app >/dev/null 2>&1 && [[ -x /Applications/LibreOffice.app/Contents/MacOS/soffice ]]; then
+  osascript -e 'tell application "Keynote"' -e 'set d to make new document' \
+    -e 'set object text of default title item of slide 1 of d to "QuickConvert test deck"' \
+    -e "save d in POSIX file \"$PWD/deck.key\"" -e 'close d saving no' -e 'quit' -e 'end tell' >/dev/null 2>&1
+  if [[ -e deck.key ]]; then
+    conv pdf "$PWD/deck.key" >/dev/null; check "keynote → pdf keeps text" '[[ "$(pdftotext deck.pdf - 2>/dev/null)" == *"QuickConvert test deck"* ]]'
+    conv pptx "$PWD/deck.key" >/dev/null; check "keynote → pptx" '[[ $(ftype deck.pptx) == *PowerPoint* ]]'
+  else
+    print "skip Keynote tests (couldn't script Keynote)"
+  fi
+fi
+
 print "— Safety"
 cp photo.png 'pct%03d.png'; magick -size 8x8 xc:blue pct000.png; echo SENTINEL > pct000.jpg
 out=$(conv jpg "$PWD/pct%03d.png")

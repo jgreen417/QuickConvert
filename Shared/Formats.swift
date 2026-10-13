@@ -54,25 +54,26 @@ enum Formats {
         case .pdf: return ["png", "jpg"]
         case .video: return ["mp4", "mov", "webm", "mkv", "gif", "mp3", "m4a", "wav"]
         case .audio: return ["mp3", "m4a", "wav", "flac", "aac", "ogg", "opus", "aiff"]
-        case .text: return ["docx", "doc", "odt", "rtf", "txt", "html"] + (office ? ["pdf"] : [])
+        case .text: return (office ? ["pdf"] : []) + ["docx", "doc", "odt", "rtf", "txt", "html"]
         case .slides: return office ? ["pdf", "pptx", "odp"] : []
         case .sheet: return office ? ["pdf", "xlsx", "ods", "csv"] : []
         }
     }
 
-    /// Targets valid for every selected file, minus formats they already are.
+    /// Targets valid for every selected file, minus formats they already are, in the first file's
+    /// natural order (so a video offers MP4 first, not GIF; the picker defaults to the first entry).
     static func commonTargets(for urls: [URL], office: Bool) -> [String] {
-        var common: Set<String>?
+        guard let firstKind = urls.first.flatMap(kind(of:)) else { return [] }
+        var common = Set(targets(for: firstKind, office: office))
         var sources = Set<String>()
         for url in urls {
             guard let k = kind(of: url) else { return [] }
-            let t = Set(targets(for: k, office: office))
-            common = common.map { $0.intersection(t) } ?? t
+            common.formIntersection(targets(for: k, office: office))
             sources.insert(normalize(url.pathExtension))
         }
         // Converting a.png + b.jpg to png is still useful for b; only hide a target when every file already has it.
         let hide = sources.count == 1 ? sources : []
-        return allTargets.filter { common?.contains($0) == true && !hide.contains($0) }
+        return targets(for: firstKind, office: office).filter { common.contains($0) && !hide.contains($0) }
     }
 
     static func normalize(_ ext: String) -> String {

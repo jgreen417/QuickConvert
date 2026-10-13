@@ -44,7 +44,7 @@ If **Convert to** doesn't appear, check **System Settings › General › Login 
 | PPTX, PPT, ODP, KEY | PDF, PPTX, ODP | LibreOffice |
 | XLSX, XLS, ODS, CSV, NUMBERS | PDF, XLSX, ODS, CSV | LibreOffice |
 
-With several files selected, the menu offers only formats that work for all of them.
+With several files selected, the menu offers only formats that work for all of them. Each file type lists its most common format first (MP4 for video, MP3 for audio, JPEG for images, PDF for documents), and the picker defaults to that.
 
 ## Quality
 
@@ -67,10 +67,13 @@ QuickConvert keeps as much quality as the target format allows:
 ## Tests
 
 ```bash
-Tests/run.sh
+Tests/run.sh         # 64 converter checks
+Tests/lifecycle.sh   # 18 app checks (run after ./build.sh)
 ```
 
-This runs 56 end-to-end checks through the real engines on generated files, covering every target family, LibreOffice, concurrency, stream preservation, and all the safety rules above.
+`run.sh` puts generated files through the real engines. It covers every target family, LibreOffice, Keynote (when installed), password-protected and damaged documents, concurrency, stream preservation, and all the safety rules above.
+
+`lifecycle.sh` drives the installed app through the review scenarios: jobs arriving while the welcome or failure dialog is open, long jobs, Cancel All, forged and old-style links, and the "Nothing to convert" and "Too many files" rejections. It launches the app with `open --env QC_TEST_DWELL=… QC_TEST_LOG=…`, which logs each dialog and answers it automatically while it still runs as a real dialog. Only a local launch can set these variables; links can't.
 
 ## Project layout
 
@@ -88,6 +91,6 @@ uninstall.sh  Remove everything
 
 - Apple silicon only. The engines are expected under `/opt/homebrew` or `/usr/local`.
 - Signed for local use with an Apple Development certificate. Sharing it with other Macs would need Developer ID signing and notarization.
-- Very large media files have no time limit (use **Cancel All**). Password-protected PDFs are reported as such and skipped.
+- Very large media files have no time limit (use **Cancel All**). Password-protected PDFs are reported as such.
 - Folders aren't converted recursively. Select the files instead.
-- Keynote (`.key`) import goes through LibreOffice and hasn't been tested. Numbers files have been tested (→ PDF and XLSX).
+- Password-protected Office files can't be converted, because headless LibreOffice and textutil can't ask for the password. They fail within a couple of seconds with a "password-protected" message and leave nothing behind.

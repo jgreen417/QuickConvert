@@ -87,16 +87,52 @@ enum Converter {
             return try publish([(out, ".\(ext)")], for: input)
 
         case .text where ext != "pdf":
+            try checkDocumentSignature(input, srcExt)
             try run("textutil", ["-convert", ext, input.path, "-output", out.path], timeout: 300)
+            let size = (try? out.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            guard size > 0 else {
+                throw ConversionError("Couldn't read this document. It may be password-protected or damaged.")
+            }
             return try publish([(out, ".\(ext)")], for: input)
 
         case .text, .slides, .sheet:
             // Private profile per job: isolated from the GUI and from parallel jobs, removed with the staging dir.
             // The deadline catches documents that stall headless LibreOffice (e.g. password prompts).
             let profile = job.dir.appendingPathComponent("profile").absoluteString
-            try run(Formats.libreOffice, ["-env:UserInstallation=\(profile)", "--headless",
-                                          "--convert-to", ext, "--outdir", job.out.path, job.input.path], timeout: 600)
+            do {
+                try run(Formats.libreOffice, ["-env:UserInstallation=\(profile)", "--headless",
+                                              "--convert-to", ext, "--outdir", job.out.path, job.input.path], timeout: 600)
+            } catch let error as ConversionError where error.message.contains("could not be loaded") {
+                // Headless LibreOffice can't ask for a password, so encrypted documents land here too.
+                throw ConversionError("LibreOffice couldn't open this file. It may be password-protected or damaged.")
+            }
             return try publish([(job.out.appendingPathComponent("in.\(ext)"), ".\(ext)")], for: input)
+        }
+    }
+
+    /// textutil reads anything it doesn't recognise as plain text and exits 0, so an encrypted or damaged
+    /// DOCX would "convert" into pages of binary garbage. Check the container signature first.
+    private static func checkDocumentSignature(_ url: URL, _ srcExt: String) throws {
+        guard let handle = FileHandle(forReadingAtPath: url.path) else { return }
+        defer { try? handle.close() }
+        let head = [UInt8](handle.readData(ofLength: 8))
+        let zip = head.starts(with: [0x50, 0x4B, 0x03, 0x04])
+        let compound = head.starts(with: [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]) // OLE: legacy .doc, encrypted OOXML
+        let rtf = head.starts(with: Array("{\\rtf".utf8))
+        let damaged = ConversionError("This file isn't a valid .\(srcExt) document. It may be damaged.")
+        switch srcExt {
+        case "docx":
+            if compound { throw ConversionError("This document is password-protected") }
+            if !zip { throw damaged }
+        case "odt":
+            if !zip { throw damaged }
+        case "doc":
+            // Word also saves RTF and HTML with a .doc name; textutil handles those fine.
+            if !(compound || rtf || head.first == UInt8(ascii: "<")) { throw damaged }
+        case "rtf":
+            if !rtf { throw damaged }
+        default:
+            break // txt/html: any text is valid input
         }
     }
 
@@ -388,7 +424,10 @@ enum Converter {
             throw ConversionError("\((name as NSString).lastPathComponent) was stopped after \(Int(timeout / 60)) minutes without finishing")
         }
         guard p.terminationStatus == 0 else {
-            let msg = String(decoding: stderr, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            // Homebrew's fontconfig warns on every LibreOffice/ImageMagick start; it's never the cause.
+            let msg = String(decoding: stderr, as: UTF8.self)
+                .split(separator: "\n").filter { !$0.hasPrefix("Fontconfig warning") }
+                .joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
             throw ConversionError("\((name as NSString).lastPathComponent) failed: \(msg.suffix(400))")
         }
         return String(decoding: stdout, as: UTF8.self)

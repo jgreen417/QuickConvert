@@ -28,8 +28,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var busy: Bool { done < total }
 
+    // Test mode for Tests/lifecycle.sh. Only `open --env` can set these, so links and websites can't.
+    // Every dialog is logged and answered automatically after QC_TEST_DWELL seconds, while still running
+    // as a real modal session, so jobs can arrive mid-dialog exactly as they would for a person.
+    private let testDwell = ProcessInfo.processInfo.environment["QC_TEST_DWELL"].flatMap(Double.init)
+    private let testLog = ProcessInfo.processInfo.environment["QC_TEST_LOG"]
+
+    private func log(_ event: String) {
+        guard let testLog, let data = "\(event)\n".data(using: .utf8) else { return }
+        if let h = FileHandle(forWritingAtPath: testLog) {
+            h.seekToEndOfFile(); h.write(data); try? h.close()
+        } else {
+            FileManager.default.createFile(atPath: testLog, contents: data)
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) { log("quit") }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        log("launch")
         NSApp.servicesProvider = self
+        // Test mode: press Cancel All after N seconds, the same action as the menu-bar item.
+        if testDwell != nil, let after = ProcessInfo.processInfo.environment["QC_TEST_CANCEL_AFTER"].flatMap(Double.init) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + after) { self.log("cancel all"); self.cancelAll() }
+        }
         // Requests arrive right after launch; a plain launch means the user opened the app.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
             if !self.sawRequest { self.showWelcome() }
@@ -110,7 +132,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let id = UUID()
         queue.addOperation {
             var failure: String?
-            if Converter.generation == generation {
+            var wasCancelled = Converter.generation != generation
+            if !wasCancelled {
                 DispatchQueue.main.async { self.active.append(Running(id: id, name: name)); self.updateStatus() }
                 var lastShown = -1
                 let report = { (fraction: Double) in
@@ -123,10 +146,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
                 do { try Converter.convert(file, to: ext, progress: report) }
-                catch is CancelledError {}
+                catch is CancelledError { wasCancelled = true }
                 catch { failure = "\(name): \(error.localizedDescription)" }
             }
             DispatchQueue.main.async {
+                self.log("finished: \(name) \(wasCancelled ? "cancelled" : failure == nil ? "ok" : "failed")")
                 self.active.removeAll { $0.id == id }
                 self.done += 1
                 if let failure { self.failures.append(failure) }
@@ -184,11 +208,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Lifecycle
 
     @discardableResult
-    private func runModal(_ alert: NSAlert) -> NSApplication.ModalResponse {
+    private func runModal(_ alert: NSAlert, testAnswer: NSApplication.ModalResponse = .alertFirstButtonReturn) -> NSApplication.ModalResponse {
         modalDepth += 1
         defer { modalDepth -= 1 }
+        log("dialog: \(alert.messageText)")
+        if let testDwell {
+            // Answer only once this dialog is the frontmost modal, so a nested dialog's timer never closes an outer one.
+            var waited = 0.0
+            let timer = Timer(timeInterval: 0.1, repeats: true) { t in
+                waited += 0.1
+                guard waited >= testDwell, NSApp.modalWindow === alert.window else { return }
+                t.invalidate()
+                NSApp.stopModal(withCode: testAnswer)
+            }
+            RunLoop.main.add(timer, forMode: .common)
+        }
         NSApp.activate(ignoringOtherApps: true)
-        return alert.runModal()
+        let response = alert.runModal()
+        log("closed: \(alert.messageText)")
+        return response
     }
 
     /// Quits a few seconds after the last work or dialog, re-checking at fire time in case a job arrived.
@@ -211,7 +249,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             + "\n\nWhere that menu isn't available (like iCloud Drive), use Quick Actions › Convert with QuickConvert…, drop files on this app, or choose them here."
         alert.addButton(withTitle: "Choose Files…")
         alert.addButton(withTitle: enabled ? "Done" : "Enable Finder Extension")
-        let response = runModal(alert)
+        let response = runModal(alert, testAnswer: .alertSecondButtonReturn)
         if response == .alertFirstButtonReturn {
             let panel = NSOpenPanel()
             panel.allowsMultipleSelection = true
