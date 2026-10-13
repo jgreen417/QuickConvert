@@ -5,7 +5,10 @@ set -uo pipefail
 ROOT="${0:A:h:h}"
 W=$(mktemp -d -t qc-tests)
 trap 'rm -rf "$W"' EXIT
-swiftc -O -swift-version 5 "$ROOT/App/Converter.swift" "$ROOT/Shared/Formats.swift" "$ROOT/Tests/main.swift" -o "$W/qct" || exit 1
+# QC_ARCH=x86_64 runs the converter as Intel code (under Rosetta on Apple silicon).
+ARCH=${QC_ARCH:-$(uname -m)}
+swiftc -O -swift-version 5 -target $ARCH-apple-macos13.0 "$ROOT/App/Converter.swift" "$ROOT/Shared/Formats.swift" "$ROOT/Tests/main.swift" -o "$W/qct-bin" || exit 1
+printf '#!/bin/sh\nexec arch -%s "%s" "$@"\n' $ARCH "$W/qct-bin" > "$W/qct" && chmod +x "$W/qct"
 mkdir "$W/f" && cd "$W/f"
 pass=0; fail=0
 ok()  { print -r -- $'\e[32mPASS\e[0m' "$1"; ((pass++)); }
@@ -99,27 +102,26 @@ check "damaged docx → clear error, no garbage" '[[ $out == *"isn'"'"'t a valid
 printf '{\\rtf1 hello}' > disguised.doc; conv txt "$PWD/disguised.doc" >/dev/null
 check "RTF saved as .doc still converts" '[[ $(cat disguised.txt) == hello ]]'
 if [[ -x /Applications/LibreOffice.app/Contents/MacOS/soffice ]]; then
-  # Encrypt with a LibreOffice macro (its bundled Python can only run inside LibreOffice).
-  SO=/Applications/LibreOffice.app/Contents/MacOS/soffice; P=$W/lo-enc
-  $SO -env:UserInstallation=file://$P --headless --terminate_after_init >/dev/null 2>&1
-  mkdir -p $P/user/Scripts/python && cat > $P/user/Scripts/python/enc.py <<'PY'
-import os, uno
-from com.sun.star.beans import PropertyValue
-def P(n, v):
-    p = PropertyValue(); p.Name = n; p.Value = v; return p
-def main(*args):
-    desk = XSCRIPTCONTEXT.getDesktop(); base = os.environ["QC_DIR"]
-    for src, dst, flt in [("memo.txt", "locked.docx", "MS Word 2007 XML"), ("sheet.csv", "locked.xlsx", "Calc MS Excel 2007 XML"), ("memo.txt", "locked.odt", "writer8")]:
-        d = desk.loadComponentFromURL(uno.systemPathToFileUrl(os.path.join(base, src)), "_blank", 0, (P("Hidden", True),))
-        d.storeToURL(uno.systemPathToFileUrl(os.path.join(base, dst)), (P("FilterName", flt), P("Password", "pw")))
-        d.close(True)
-    desk.terminate()
-PY
-  QC_DIR=$PWD $SO -env:UserInstallation=file://$P --headless 'vnd.sun.star.script:enc.py$main?language=Python&location=user' >/dev/null 2>&1
-  out=$(conv txt "$PWD/locked.docx"); check "encrypted docx → txt: 'password-protected'"    '[[ $out == *"password-protected"* && ! -e locked.txt ]]'
-  out=$(conv pdf "$PWD/locked.docx"); check "encrypted docx → pdf: clear error, fast"       '[[ $out == *"may be password-protected"* && ! -e locked.pdf ]]'
-  out=$(conv csv "$PWD/locked.xlsx"); check "encrypted xlsx → csv: clear error"             '[[ $out == *"may be password-protected"* && ! -e locked.csv ]]'
-  out=$(conv rtf "$PWD/locked.odt");  check "encrypted odt → rtf: clear error"              '[[ $out == *"may be password-protected"* && ! -e locked.rtf ]]'
+  mkdir prot && "$ROOT/Tests/make-protected.sh" prot
+  for f in docx doc xlsx xls odt; do
+    out=$(conv pdf "$PWD/prot/locked.$f"); check "protected .$f, no password → 'password-protected'" '[[ $out == *"password-protected"* && ! -e prot/locked.pdf ]]'
+  done
+  out=$(QCT_PASSWORD=nope conv txt "$PWD/prot/locked.docx"); check "wrong password → 'Incorrect password'" '[[ $out == *"Incorrect password"* && ! -e prot/locked.txt ]]'
+  for f in docx doc odt; do
+    QCT_PASSWORD=pw conv txt "$PWD/prot/locked.$f" >/dev/null
+    check "protected .$f + password → txt" '[[ "$(cat prot/locked*.txt 2>/dev/null)" == *"Top secret memo"* ]]'; rm -f prot/locked*.txt
+  done
+  for f in xlsx xls; do
+    QCT_PASSWORD=pw conv csv "$PWD/prot/locked.$f" >/dev/null
+    check "protected .$f + password → csv" '[[ "$(cat prot/locked.csv 2>/dev/null)" == "a,b"* ]]'; rm -f prot/locked.csv
+  done
+  QCT_PASSWORD=pw conv pdf "$PWD/prot/locked.docx" >/dev/null; check "protected .docx + password → pdf" '[[ "$(pdftotext prot/locked.pdf - 2>/dev/null)" == *"Top secret memo"* ]]'
+  out=$(QC_NO_OFFICE=1 conv txt "$PWD/prot/locked.doc")
+  check "no LibreOffice: protected .doc detected, not garbage" '[[ $out == *"Install LibreOffice"* && ! -e prot/locked.txt ]]'
+  textutil -convert doc memo.txt -output plain.doc; conv txt "$PWD/plain.doc" >/dev/null
+  check "plain .doc via LibreOffice → clean txt (no BOM)" '[[ "$(cat plain.txt)" == "Hello from QuickConvert" ]]'
+  QC_NO_OFFICE=1 conv txt "$PWD/plain.doc" >/dev/null
+  check "no LibreOffice: plain .doc not mistaken for protected" '[[ "$(cat "plain 2.txt")" == "Hello from QuickConvert" ]]'
 fi
 if ls -d /Applications/Keynote*.app >/dev/null 2>&1 && [[ -x /Applications/LibreOffice.app/Contents/MacOS/soffice ]]; then
   osascript -e 'tell application "Keynote"' -e 'set d to make new document' \
@@ -149,5 +151,16 @@ echo "x" > same.png; magick -size 8x8 xc:red same.png; magick -size 8x8 xc:red s
 conv jpg "$PWD/same.png" >/dev/null; check "existing output is never replaced" '[[ -s "same 2.jpg" ]]'
 check "no staging dirs left behind" '[[ -z "$(find ${TMPDIR:-/tmp} -maxdepth 1 -name "QuickConvert-*" 2>/dev/null)" ]]'
 
-print "\n$pass passed, $fail failed"
+print "— Other volumes (results cross from the internal staging disk)"
+for fs in APFS HFS+ ExFAT MS-DOS; do
+  hdiutil create -quiet -size 64m -fs "$fs" -volname "QC$fs" -o "$W/vol-$fs.dmg" >/dev/null 2>&1 || { bad "$fs: couldn't create test volume"; continue; }
+  M=$(hdiutil attach -nobrowse "$W/vol-$fs.dmg" 2>/dev/null | awk -F'\t' '/\/Volumes\//{print $NF}')
+  command cp photo.png doc.pdf clip.mov "$M/"; command cp photo.png "$M/pct%03d.png"; echo SENTINEL > "$M/photo.webp"
+  conv webp "$M/photo.png" >/dev/null; conv png "$M/doc.pdf" "$M/doc.pdf" >/dev/null; conv mp4 "$M/clip.mov" >/dev/null; conv jpg "$M/pct%03d.png" >/dev/null
+  check "$fs: image, video, %-name, 2 concurrent PDFs, no overwrite" \
+    '[[ $(cat "$M/photo.webp") == SENTINEL && -s "$M/photo 2.webp" && -s "$M/clip.mp4" && -s "$M/pct%03d.jpg" && $(command ls "$M" | grep -c "^doc.*-[0-9]*\.png$") == 6 ]]'
+  hdiutil detach -quiet "$M"
+done
+
+print "\\n$pass passed, $fail failed"
 exit $(( fail > 0 ))

@@ -6,18 +6,22 @@ cd "${0:A:h}"
 
 APP=build/QuickConvert.app
 EXT=$APP/Contents/PlugIns/QuickConvertFinder.appex
-TARGET="$(uname -m)-apple-macos13.0"
 IDENTITY="${IDENTITY:-$(security find-identity -v -p codesigning | awk -F'"' '/Apple Development/{print $2; exit}')}"
 : "${IDENTITY:?No Apple Development signing identity found}"
 
 rm -rf build
 mkdir -p $APP/Contents/MacOS $APP/Contents/Resources $EXT/Contents/MacOS
 
-swiftc -O -swift-version 5 -target $TARGET -module-name QuickConvert \
-  App/*.swift Shared/*.swift -o $APP/Contents/MacOS/QuickConvert
-swiftc -O -swift-version 5 -target $TARGET -module-name QuickConvertFinder -application-extension \
-  -Xlinker -e -Xlinker _NSExtensionMain -framework FinderSync \
-  Extension/*.swift Shared/*.swift -o $EXT/Contents/MacOS/QuickConvertFinder
+# Universal binaries: Apple silicon + Intel.
+for arch in arm64 x86_64; do
+  swiftc -O -swift-version 5 -target $arch-apple-macos13.0 -module-name QuickConvert \
+    App/*.swift Shared/*.swift -o build/QuickConvert-$arch
+  swiftc -O -swift-version 5 -target $arch-apple-macos13.0 -module-name QuickConvertFinder -application-extension \
+    -Xlinker -e -Xlinker _NSExtensionMain -framework FinderSync \
+    Extension/*.swift Shared/*.swift -o build/QuickConvertFinder-$arch
+done
+lipo -create build/QuickConvert-{arm64,x86_64} -output $APP/Contents/MacOS/QuickConvert
+lipo -create build/QuickConvertFinder-{arm64,x86_64} -output $EXT/Contents/MacOS/QuickConvertFinder
 
 cp App/Info.plist $APP/Contents/Info.plist
 cp App/AppIcon.icns $APP/Contents/Resources/

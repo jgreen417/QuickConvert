@@ -8,11 +8,20 @@ struct ConversionError: LocalizedError {
 
 struct CancelledError: Error {}
 
+/// The document is encrypted. The app asks for the password and retries with it.
+struct PasswordRequired: LocalizedError {
+    let wrong: Bool
+    var errorDescription: String? { wrong ? "Incorrect password" : "This document is password-protected" }
+}
+
 /// Converts one file. Engines only ever see fixed names inside a private per-job staging
 /// directory (ImageMagick and FFmpeg treat things like `%03d` in paths as patterns), outputs are
 /// validated there, then published next to the original with no-overwrite renames.
 enum Converter {
-    static var officeAvailable: Bool { FileManager.default.isExecutableFile(atPath: Formats.libreOffice) }
+    /// QC_NO_OFFICE (tests only) simulates a Mac without LibreOffice.
+    static var officeAvailable: Bool {
+        ProcessInfo.processInfo.environment["QC_NO_OFFICE"] == nil && FileManager.default.isExecutableFile(atPath: Formats.libreOffice)
+    }
 
     static func validate(_ input: URL, to ext: String) throws {
         var st = stat()
@@ -26,7 +35,7 @@ enum Converter {
 
     /// `progress` (0...1) is reported for audio/video jobs, from a background thread.
     @discardableResult
-    static func convert(_ input: URL, to ext: String, progress: ((Double) -> Void)? = nil) throws -> [URL] {
+    static func convert(_ input: URL, to ext: String, password: String? = nil, progress: ((Double) -> Void)? = nil) throws -> [URL] {
         try validate(input, to: ext)
         let kind = Formats.kind(of: input)!
         let srcExt = Formats.normalize(input.pathExtension)
@@ -86,27 +95,46 @@ enum Converter {
             try ffmpeg(job.input, out, ext, kind, progress: progress)
             return try publish([(out, ".\(ext)")], for: input)
 
-        case .text where ext != "pdf":
-            try checkDocumentSignature(input, srcExt)
-            try run("textutil", ["-convert", ext, input.path, "-output", out.path], timeout: 300)
-            let size = (try? out.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-            guard size > 0 else {
-                throw ConversionError("Couldn't read this document. It may be password-protected or damaged.")
-            }
-            return try publish([(out, ".\(ext)")], for: input)
-
         case .text, .slides, .sheet:
+            // Protected documents are decrypted to a staged copy first (needs the password from the user).
+            var doc = job.input
+            // Legacy .doc/.xls/.ppt can't be checked up front, so a supplied password means "decrypt it".
+            if try isEncrypted(input, srcExt) || (password != nil && ["doc", "xls", "ppt"].contains(srcExt)) {
+                doc = try decrypt(job, srcExt, password: password)
+            }
+
+            // Undecrypted .doc goes to LibreOffice when present: it detects encryption, where textutil
+            // would turn an encrypted file into pages of garbage.
+            let legacyWordViaOffice = srcExt == "doc" && doc == job.input && officeAvailable
+            if kind == .text && ext != "pdf" && !legacyWordViaOffice {
+                try checkDocumentSignature(doc, srcExt)
+                if doc == job.input && srcExt == "doc" && wordDocumentIsEncrypted(doc) {
+                    throw ConversionError("This document is password-protected. Install LibreOffice to convert protected documents.")
+                }
+                // The original path keeps relative references (HTML images) resolving; a decrypted copy has none.
+                try run("textutil", ["-convert", ext, doc == job.input ? input.path : doc.path, "-output", out.path], timeout: 300)
+                let size = (try? out.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+                guard size > 0 else {
+                    throw ConversionError("Couldn't read this document. It may be damaged.")
+                }
+                return try publish([(out, ".\(ext)")], for: input)
+            }
+
             // Private profile per job: isolated from the GUI and from parallel jobs, removed with the staging dir.
-            // The deadline catches documents that stall headless LibreOffice (e.g. password prompts).
             let profile = job.dir.appendingPathComponent("profile").absoluteString
             do {
                 try run(Formats.libreOffice, ["-env:UserInstallation=\(profile)", "--headless",
-                                              "--convert-to", ext, "--outdir", job.out.path, job.input.path], timeout: 600)
+                                              "--convert-to", ext, "--outdir", job.out.path, doc.path], timeout: 600)
             } catch let error as ConversionError where error.message.contains("could not be loaded") {
-                // Headless LibreOffice can't ask for a password, so encrypted documents land here too.
-                throw ConversionError("LibreOffice couldn't open this file. It may be password-protected or damaged.")
+                // Legacy .doc/.xls/.ppt don't reveal encryption up front; a load failure may mean a password.
+                if doc == job.input && ["doc", "xls", "ppt"].contains(srcExt) && password == nil {
+                    throw PasswordRequired(wrong: false)
+                }
+                throw ConversionError("LibreOffice couldn't open this file. It may be damaged.")
             }
-            return try publish([(job.out.appendingPathComponent("in.\(ext)"), ".\(ext)")], for: input)
+            let produced = job.out.appendingPathComponent("\(doc.deletingPathExtension().lastPathComponent).\(ext)")
+            if ext == "txt" { stripByteOrderMark(produced) } // LibreOffice's text export starts with one; textutil's doesn't
+            return try publish([(produced, ".\(ext)")], for: input)
         }
     }
 
@@ -122,7 +150,6 @@ enum Converter {
         let damaged = ConversionError("This file isn't a valid .\(srcExt) document. It may be damaged.")
         switch srcExt {
         case "docx":
-            if compound { throw ConversionError("This document is password-protected") }
             if !zip { throw damaged }
         case "odt":
             if !zip { throw damaged }
@@ -134,6 +161,116 @@ enum Converter {
         default:
             break // txt/html: any text is valid input
         }
+    }
+
+    /// Encrypted OOXML is an OLE compound file instead of a zip; encrypted ODF lists encryption data in its manifest.
+    private static func isEncrypted(_ url: URL, _ srcExt: String) throws -> Bool {
+        switch srcExt {
+        case "docx", "xlsx", "pptx":
+            guard let handle = FileHandle(forReadingAtPath: url.path) else { return false }
+            defer { try? handle.close() }
+            return [UInt8](handle.readData(ofLength: 8)) == [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]
+        case "odt", "ods", "odp":
+            let manifest = (try? run("unzip", ["-p", url.path, "META-INF/manifest.xml"], timeout: 30)) ?? ""
+            return manifest.contains("encryption-data")
+        default:
+            return false
+        }
+    }
+
+    private static func stripByteOrderMark(_ url: URL) {
+        guard let data = try? Data(contentsOf: url), data.starts(with: [0xEF, 0xBB, 0xBF]) else { return }
+        try? data.dropFirst(3).write(to: url)
+    }
+
+    /// Reads the fEncrypted flag from a Word 97–2003 file. Walks the OLE compound file: FAT from the header's
+    /// DIFAT, the directory chain to the "WordDocument" stream (in the mini stream when it's small), then
+    /// checks the FIB: magic 0xA5EC at 0x00 and bit 8 of the flags word at 0x0A.
+    private static func wordDocumentIsEncrypted(_ url: URL) -> Bool {
+        guard let data = try? Data(contentsOf: url, options: .alwaysMapped), data.count >= 512 else { return false }
+        let b = [UInt8](data)
+        func u16(_ o: Int) -> Int { o >= 0 && o + 1 < b.count ? Int(b[o]) | Int(b[o + 1]) << 8 : 0 }
+        func u32(_ o: Int) -> Int { u16(o) | u16(o + 2) << 16 }
+        let end = 0xFFFF_FFFA
+        let sectorSize = 1 << u16(0x1E), miniSize = 1 << u16(0x20), cutoff = u32(0x38)
+        guard sectorSize >= 512, sectorSize <= 4096 else { return false }
+
+        var fat: [Int] = []
+        for i in 0..<109 {
+            let sector = u32(0x4C + 4 * i)
+            guard sector < end else { break }
+            let base = (sector + 1) * sectorSize
+            fat += (0..<sectorSize / 4).map { u32(base + $0 * 4) }
+        }
+        func chain(_ start: Int) -> [Int] {
+            var out: [Int] = [], s = start
+            while s < end, s < fat.count, out.count < fat.count { out.append(s); s = fat[s] }
+            return out
+        }
+
+        let target = Array("WordDocument".utf16)
+        var rootStart = -1
+        for sector in chain(u32(0x30)) {
+            for slot in 0..<sectorSize / 128 {
+                let e = (sector + 1) * sectorSize + slot * 128
+                let length = max(u16(e + 0x40) / 2 - 1, 0)
+                let name = (0..<length).map { UInt16(u16(e + $0 * 2)) }
+                if rootStart < 0 { rootStart = u32(e + 0x74) } // first entry is the Root Entry
+                guard name == target else { continue }
+                let start = u32(e + 0x74), size = u32(e + 0x78)
+                var fib: Int
+                if size < cutoff { // small streams live in the mini stream, inside the root's sectors
+                    let offset = start * miniSize, rootChain = chain(rootStart)
+                    guard offset / sectorSize < rootChain.count else { return false }
+                    fib = (rootChain[offset / sectorSize] + 1) * sectorSize + offset % sectorSize
+                } else {
+                    fib = (start + 1) * sectorSize
+                }
+                return u16(fib) == 0xA5EC && u16(fib + 0x0A) & 0x0100 != 0
+            }
+        }
+        return false
+    }
+
+    /// LibreOffice macro that opens a protected document with the password from the environment and saves an
+    /// unprotected copy in the same format. It runs inside LibreOffice (its Python can't be launched on its own).
+    private static let decryptMacro = """
+    import os, uno
+    from com.sun.star.beans import PropertyValue
+    def P(n, v):
+        p = PropertyValue(); p.Name = n; p.Value = v; return p
+    def main(*args):
+        desk = XSCRIPTCONTEXT.getDesktop()
+        try:
+            d = desk.loadComponentFromURL(uno.systemPathToFileUrl(os.environ["QC_SRC"]), "_blank", 0,
+                                          (P("Hidden", True), P("Password", os.environ["QC_PASSWORD"])))
+            if d is not None:
+                flt = [a.Value for a in d.getArgs() if a.Name == "FilterName"][0]
+                d.storeToURL(uno.systemPathToFileUrl(os.environ["QC_DST"]), (P("FilterName", flt),))
+                d.close(True)
+        finally:
+            desk.terminate()
+    """
+
+    /// Decrypts into the job's staging dir; the password only travels through the LibreOffice process environment.
+    private static func decrypt(_ job: Staging, _ srcExt: String, password: String?) throws -> URL {
+        guard let password, !password.isEmpty else { throw PasswordRequired(wrong: false) }
+        guard officeAvailable else {
+            throw ConversionError("This document is password-protected. Install LibreOffice to convert protected documents.")
+        }
+        let profileDir = job.dir.appendingPathComponent("decrypt-profile")
+        let profile = profileDir.absoluteString
+        try run(Formats.libreOffice, ["-env:UserInstallation=\(profile)", "--headless", "--terminate_after_init"], timeout: 120)
+        let scripts = profileDir.appendingPathComponent("user/Scripts/python")
+        try FileManager.default.createDirectory(at: scripts, withIntermediateDirectories: true)
+        try decryptMacro.write(to: scripts.appendingPathComponent("qcdecrypt.py"), atomically: true, encoding: .utf8)
+
+        let plain = job.dir.appendingPathComponent("src/plain.\(srcExt)")
+        try run(Formats.libreOffice, ["-env:UserInstallation=\(profile)", "--headless",
+                                      "vnd.sun.star.script:qcdecrypt.py$main?language=Python&location=user"],
+                timeout: 300, environment: ["QC_SRC": job.input.path, "QC_DST": plain.path, "QC_PASSWORD": password])
+        guard FileManager.default.fileExists(atPath: plain.path) else { throw PasswordRequired(wrong: true) }
+        return plain
     }
 
     // MARK: - FFmpeg
@@ -377,7 +514,7 @@ enum Converter {
     /// `timeout` stops tools that should never take long; open-ended media jobs rely on Cancel All instead.
     @discardableResult
     private static func run(_ name: String, _ args: [String], timeout: TimeInterval? = nil,
-                            onLine: ((String) -> Void)? = nil) throws -> String {
+                            environment: [String: String] = [:], onLine: ((String) -> Void)? = nil) throws -> String {
         guard let path = tool(name) else {
             let formula = ["magick": "imagemagick", "pdftoppm": "poppler", "pdfinfo": "poppler", "rsvg-convert": "librsvg", "ffprobe": "ffmpeg"][name]
             throw ConversionError(name.hasPrefix("/") ? "\(name) not found" : "\(name) not found (brew install \(formula ?? name))")
@@ -385,6 +522,9 @@ enum Converter {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
         p.arguments = args
+        if !environment.isEmpty {
+            p.environment = ProcessInfo.processInfo.environment.merging(environment) { $1 }
+        }
         let out = Pipe(), err = Pipe()
         p.standardOutput = out
         p.standardError = err

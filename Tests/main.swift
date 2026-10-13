@@ -11,7 +11,7 @@ for f in args.dropFirst() {
         var maxProgress = -1.0
         let r: String
         do {
-            let outs = try Converter.convert(URL(fileURLWithPath: f), to: args[0]) { p in lock.withLock { maxProgress = max(maxProgress, p) } }
+            let outs = try Converter.convert(URL(fileURLWithPath: f), to: args[0], password: ProcessInfo.processInfo.environment["QCT_PASSWORD"]) { p in lock.withLock { maxProgress = max(maxProgress, p) } }
             r = "OK " + outs.map(\.lastPathComponent).joined(separator: ", ")
         } catch {
             r = "ERR " + error.localizedDescription

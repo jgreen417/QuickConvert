@@ -33,6 +33,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // as a real modal session, so jobs can arrive mid-dialog exactly as they would for a person.
     private let testDwell = ProcessInfo.processInfo.environment["QC_TEST_DWELL"].flatMap(Double.init)
     private let testLog = ProcessInfo.processInfo.environment["QC_TEST_LOG"]
+    private var testPasswords = ProcessInfo.processInfo.environment["QC_TEST_PASSWORDS"]?
+        .split(separator: ",").map(String.init) ?? []
 
     private func log(_ event: String) {
         guard let testLog, let data = "\(event)\n".data(using: .utf8) else { return }
@@ -46,7 +48,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) { log("quit") }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        log("launch")
+        #if arch(x86_64)
+        log("launch x86_64")
+        #else
+        log("launch arm64")
+        #endif
         NSApp.servicesProvider = self
         // Test mode: press Cancel All after N seconds, the same action as the menu-bar item.
         if testDwell != nil, let after = ProcessInfo.processInfo.environment["QC_TEST_CANCEL_AFTER"].flatMap(Double.init) {
@@ -124,7 +130,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Work
 
-    private func enqueue(_ file: URL, _ ext: String) {
+    private func enqueue(_ file: URL, _ ext: String, password: String? = nil, attempt: Int = 0) {
         total += 1
         updateStatus()
         let generation = Converter.generation
@@ -132,6 +138,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let id = UUID()
         queue.addOperation {
             var failure: String?
+            var needsPassword: PasswordRequired?
             var wasCancelled = Converter.generation != generation
             if !wasCancelled {
                 DispatchQueue.main.async { self.active.append(Running(id: id, name: name)); self.updateStatus() }
@@ -145,18 +152,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         self.updateStatus()
                     }
                 }
-                do { try Converter.convert(file, to: ext, progress: report) }
+                do { try Converter.convert(file, to: ext, password: password, progress: report) }
                 catch is CancelledError { wasCancelled = true }
+                catch let error as PasswordRequired { needsPassword = error }
                 catch { failure = "\(name): \(error.localizedDescription)" }
             }
             DispatchQueue.main.async {
-                self.log("finished: \(name) \(wasCancelled ? "cancelled" : failure == nil ? "ok" : "failed")")
+                let outcome = wasCancelled ? "cancelled" : needsPassword.map { $0.wrong ? "wrong password" : "needs password" } ?? (failure == nil ? "ok" : "failed")
+                self.log("finished: \(name) \(outcome)")
                 self.active.removeAll { $0.id == id }
                 self.done += 1
                 if let failure { self.failures.append(failure) }
+                // Ask before the idle check below, so a retry is queued before the app could decide it's done.
+                if let needsPassword { self.askPassword(for: file, to: ext, wrong: needsPassword.wrong, attempt: attempt) }
                 self.updateStatus()
                 if !self.busy { self.finish() }
             }
+        }
+    }
+
+    private func askPassword(for file: URL, to ext: String, wrong: Bool, attempt: Int) {
+        let name = file.lastPathComponent
+        guard attempt < 3 else {
+            failures.append("\(name): Incorrect password")
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = wrong ? "Incorrect password for “\(name)”" : "“\(name)” is password-protected"
+        alert.informativeText = "Enter its password to convert it. QuickConvert uses it only for this conversion and doesn't save it."
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Convert")
+        alert.addButton(withTitle: "Skip")
+        alert.window.initialFirstResponder = field
+        if runModal(alert) == .alertFirstButtonReturn, !field.stringValue.isEmpty {
+            enqueue(file, ext, password: field.stringValue, attempt: attempt + 1)
         }
     }
 
@@ -219,6 +249,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 waited += 0.1
                 guard waited >= testDwell, NSApp.modalWindow === alert.window else { return }
                 t.invalidate()
+                if let field = alert.accessoryView as? NSSecureTextField, !self.testPasswords.isEmpty {
+                    field.stringValue = self.testPasswords.removeFirst()
+                }
                 NSApp.stopModal(withCode: testAnswer)
             }
             RunLoop.main.add(timer, forMode: .common)
