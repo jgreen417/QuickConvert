@@ -492,6 +492,15 @@ enum Converter {
     /// Bumped by cancelAll(); jobs started under an older generation report as cancelled.
     static var generation: Int { lock.withLock { _generation } }
 
+    /// Removes work folders left by a previous run that was force-quit or crashed mid-job.
+    /// Only safe before this run starts any job, so it's called once at launch.
+    static func removeStaleStaging() {
+        let tmp = FileManager.default.temporaryDirectory
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: tmp.path)) ?? [] where name.hasPrefix("QuickConvert-") {
+            try? FileManager.default.removeItem(at: tmp.appendingPathComponent(name))
+        }
+    }
+
     static func cancelAll() {
         let procs = lock.withLock { () -> [Process] in
             _generation += 1
