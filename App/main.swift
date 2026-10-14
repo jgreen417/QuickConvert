@@ -54,7 +54,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         log("launch arm64")
         #endif
         NSApp.servicesProvider = self
-        Converter.removeStaleStaging()
         // Test mode: press Cancel All after N seconds, the same action as the menu-bar item.
         if testDwell != nil, let after = ProcessInfo.processInfo.environment["QC_TEST_CANCEL_AFTER"].flatMap(Double.init) {
             DispatchQueue.main.asyncAfter(deadline: .now() + after) { self.log("cancel all"); self.cancelAll() }
@@ -322,6 +321,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// Before the run loop starts: a file-open launch delivers its job before applicationDidFinishLaunching.
+Converter.removeStaleStaging()
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
