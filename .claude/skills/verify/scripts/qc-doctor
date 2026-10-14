@@ -1,0 +1,39 @@
+#!/bin/zsh
+# qc-doctor — read-only: is this machine's QuickConvert worth driving? Exit 1 if a required check fails.
+setopt null_glob
+APP=${QC_APP:-$HOME/Applications/QuickConvert.app}
+REPO=${0:A:h:h:h:h:h}
+EXT_ID=io.github.jgreen417.quickconvert.findersync
+fail=0
+ok()   { print "✓ $*"; }
+warn() { print "! $*"; }
+bad()  { print "✗ $*"; fail=1; }
+
+[[ -x $APP/Contents/MacOS/QuickConvert ]] && ok "app installed at $APP" || bad "no app at $APP (run ./build.sh or quickconvert setup)"
+if [[ -d $APP ]]; then
+  codesign --verify --deep --strict $APP 2>/dev/null && ok "signature valid ($(codesign -dv $APP 2>&1 | grep -oE 'Signature=adhoc|Authority=Apple Development[^\n]*' | head -1))" || bad "signature invalid"
+  if [[ -x $REPO/build/QuickConvert.app/Contents/MacOS/QuickConvert ]]; then
+    a=$(shasum $APP/Contents/MacOS/QuickConvert | cut -d' ' -f1); b=$(shasum $REPO/build/QuickConvert.app/Contents/MacOS/QuickConvert | cut -d' ' -f1)
+    [[ $a == $b ]] && ok "installed app is this checkout's build" || warn "installed app differs from $REPO/build (Homebrew install or stale build?) — run ./build.sh to drive this checkout"
+  else
+    warn "no build/ in this checkout; driving whatever is installed"
+  fi
+fi
+pluginkit -m -i $EXT_ID 2>/dev/null | grep -q '^+' && ok "Finder extension registered and enabled" || bad "Finder extension not registered/enabled (rerun quickconvert setup)"
+pgrep -f 'QuickConvertFinder.appex' >/dev/null && ok "Finder has the extension loaded" || warn "Finder hasn't loaded the extension yet (killall Finder, then check again)"
+for t in magick ffmpeg ffprobe pdftoppm pdfinfo rsvg-convert; do
+  p=$(for d in /opt/homebrew/bin /usr/local/bin /usr/bin; do [[ -x $d/$t ]] && { print $d/$t; break; }; done)
+  [[ -n $p ]] && ok "engine $t: $p" || bad "engine $t missing (brew install ffmpeg imagemagick poppler librsvg)"
+done
+[[ -x /usr/bin/textutil ]] && ok "engine textutil" || bad "textutil missing"
+[[ -x /Applications/LibreOffice.app/Contents/MacOS/soffice ]] && ok "LibreOffice present (Office targets enabled)" || warn "LibreOffice absent: Office/PDF-from-document targets are hidden"
+J="$HOME/Library/Application Support/QuickConvert/Jobs"
+if [[ -d $J ]]; then
+  [[ $(stat -f %Lp $J) == 700 && $(stat -f %u $J) == $(id -u) ]] && ok "jobs folder private (0700, yours)" || bad "jobs folder $J not 0700/owned by you"
+else warn "jobs folder missing (the app creates it at launch)"; fi
+p=$(pgrep -x QuickConvert); s=$(cat ${TMPDIR:-/tmp}/quickconvert-verify-session/pid 2>/dev/null)
+if [[ -z $p ]]; then ok "no QuickConvert instance running"
+elif [[ $p == $s ]]; then ok "running instance $p is this verification session's"
+else warn "QuickConvert $p is running and isn't ours — someone is converting; wait for it to quit"; fi
+n=$(print -l ${TMPDIR:-/tmp}/QuickConvert-* | grep -c . ); (( n == 0 )) && ok "no leftover work folders" || warn "$n leftover work folder(s) in \$TMPDIR (removed at next app launch)"
+exit $fail

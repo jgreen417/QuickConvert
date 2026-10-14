@@ -1,0 +1,113 @@
+#!/bin/zsh
+# qc-session — run ONE QuickConvert instance in test mode and drive it. The session owns the PID it
+# started; it never kills by process name. Every dialog is logged to events.log and auto-answered after
+# <dwell> seconds while still running as a real modal dialog.
+#
+#   qc-session start <dwell> [KEY=VALUE ...] [-- <file>...]   launch (optionally with files → format picker)
+#   qc-session send <file>...                                   open files in the running instance (picker)
+#   qc-session job <ext> <file>...                              Finder handoff: write a job file + open its URL
+#   qc-session url <url>                                        open a quickconvert:// URL
+#   qc-session wait <regex> [seconds=30]                        wait for an events.log line (ERE)
+#   qc-session capture <name>                                   screenshot QuickConvert's front window only
+#   qc-session log                                              print events.log
+#   qc-session status                                           pid, alive, evidence dir
+#   qc-session stop                                             stop OUR instance, save log to evidence
+set -euo pipefail
+APP=${QC_APP:-$HOME/Applications/QuickConvert.app}
+CACHE=$HOME/Library/Caches/QuickConvert-verify
+SES=${TMPDIR:-/tmp}/quickconvert-verify-session
+EVIDENCE_ROOT=${QC_VERIFY_EVIDENCE:-$CACHE/evidence}
+JOBS="$HOME/Library/Application Support/QuickConvert/Jobs"
+HERE=${0:A:h}
+
+die() { print -u2 "qc-session: $*"; exit 1; }
+pid() { cat $SES/pid 2>/dev/null || true; }
+alive() { local p=$(pid); [[ -n $p ]] && kill -0 $p 2>/dev/null; }
+evidence() { cat $SES/evidence 2>/dev/null || die "no session; run: qc-session start"; }
+wins() {
+  if [[ ! -x $CACHE/bin/wins || $HERE/wins.swift -nt $CACHE/bin/wins ]]; then
+    mkdir -p $CACHE/bin && swiftc -O $HERE/wins.swift -o $CACHE/bin/wins
+  fi
+  $CACHE/bin/wins "$@"
+}
+
+cmd_start() {
+  local dwell=${1:?usage: qc-session start <dwell> [KEY=VALUE ...] [-- file...]}; shift
+  local -a envs files
+  while (( $# )); do
+    if [[ $1 == -- ]]; then shift; files=("$@"); break; fi
+    envs+=("$1"); shift
+  done
+  alive && die "a session is already running (pid $(pid)); run: qc-session stop"
+  local other=$(pgrep -x QuickConvert || true)
+  [[ -z $other ]] || die "another QuickConvert is running (pid $other) that this session didn't start. Wait for it to quit (it quits ~5 s after its last job); don't kill it."
+  [[ -x $APP/Contents/MacOS/QuickConvert ]] || die "no app at $APP; run ./build.sh first"
+  rm -rf $SES && mkdir -p $SES
+  local dir=$EVIDENCE_ROOT/$(date +%Y%m%d-%H%M%S)
+  mkdir -p $dir && print $dir > $SES/evidence
+  : > $SES/events.log
+  # Launch the binary directly so we hold its PID; later `open -a` calls route to this instance.
+  env QC_TEST_DWELL=$dwell QC_TEST_LOG=$SES/events.log $envs $APP/Contents/MacOS/QuickConvert > $SES/app.out 2>&1 &
+  print $! > $SES/pid
+  for _ in {1..100}; do grep -q '^launch ' $SES/events.log && break; sleep 0.1; done
+  grep -q '^launch ' $SES/events.log || die "app didn't start; see $SES/app.out"
+  (( ${#files} )) && cmd_send "${files[@]}"
+  print "started pid $(pid)\nevidence: $dir"
+}
+
+cmd_send() {
+  (( $# )) || die "usage: qc-session send <file>..."
+  alive || die "no running session"
+  open -a $APP "$@"   # one open event for all files, like a multi-selection drop
+}
+
+cmd_job() {
+  local ext=${1:?usage: qc-session job <ext> <file>...}; shift
+  (( $# )) || die "usage: qc-session job <ext> <file>..."
+  alive || die "no running session"
+  local id=$(uuidgen) && mkdir -p $JOBS
+  python3 -c 'import json,sys; print(json.dumps({"to": sys.argv[1], "files": [__import__("os").path.abspath(f) for f in sys.argv[2:]]}))' \
+    "$ext" "$@" > "$JOBS/$id.json"
+  open "quickconvert://job/$id"
+  print "job $id → $ext"
+}
+
+cmd_url() { alive || die "no running session"; open "${1:?usage: qc-session url <url>}"; }
+
+cmd_wait() {
+  local re=${1:?usage: qc-session wait <regex> [seconds]} secs=${2:-30}
+  for _ in {1..$(( secs * 10 ))}; do grep -qE -- "$re" $SES/events.log 2>/dev/null && { grep -E -- "$re" $SES/events.log | tail -1; return 0; }; sleep 0.1; done
+  print -u2 "qc-session: timed out after ${secs}s waiting for /$re/; log:"; cat $SES/events.log >&2; return 1
+}
+
+cmd_capture() {
+  local name=${1:?usage: qc-session capture <name>} dir=$(evidence)
+  alive || die "no running session"
+  local id=$(wins QuickConvert | awk '$4 > 200 { print $1; exit }')
+  [[ -n $id ]] || die "QuickConvert has no window on screen right now"
+  screencapture -x -o -l $id $dir/$name.png && print $dir/$name.png
+}
+
+cmd_stop() {
+  local p=$(pid) dir=$(cat $SES/evidence 2>/dev/null || true)
+  if [[ -n $p ]] && kill -0 $p 2>/dev/null; then
+    kill $p
+    for _ in {1..50}; do kill -0 $p 2>/dev/null || break; sleep 0.1; done
+    kill -0 $p 2>/dev/null && kill -9 $p
+  fi
+  if [[ -n $dir && -d $dir ]]; then cp $SES/events.log $dir/events.log 2>/dev/null || true; cp $SES/app.out $dir/app.out 2>/dev/null || true; fi
+  rm -rf $SES
+  # Work folders our instance may have left if it was stopped mid-job (only when no QuickConvert is running).
+  pgrep -x QuickConvert >/dev/null || rm -rf ${TMPDIR:-/tmp}/QuickConvert-*(N)
+  print "stopped${p:+ pid $p}${dir:+\nevidence kept: $dir}"
+}
+
+cmd_status() {
+  if alive; then print "running pid $(pid)\nevidence: $(evidence)"; else print "no running session"; fi
+}
+
+case ${1:-} in
+  start|send|job|url|wait|capture|stop|status) c=$1; shift; cmd_$c "$@" ;;
+  log) cat $SES/events.log ;;
+  *) sed -n '2,15p' $0 | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac

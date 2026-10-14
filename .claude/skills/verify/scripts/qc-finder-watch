@@ -1,0 +1,22 @@
+#!/bin/zsh
+# qc-finder-watch <out-dir> [timeout-seconds=600]
+# Waits for a Finder context menu with an open submenu (someone right-clicks a file and hovers Convert to),
+# then captures the front Finder window and each menu window on their own, plus windows.txt with ids/sizes.
+# Nothing else on screen is captured. Exit 1 on timeout.
+set -uo pipefail
+OUT=${1:?usage: qc-finder-watch <out-dir> [timeout]}; SECS=${2:-600}
+HERE=${0:A:h}; CACHE=$HOME/Library/Caches/QuickConvert-verify
+[[ -x $CACHE/bin/wins && ! $HERE/wins.swift -nt $CACHE/bin/wins ]] || { mkdir -p $CACHE/bin && swiftc -O $HERE/wins.swift -o $CACHE/bin/wins; }
+mkdir -p $OUT
+for _ in {1..$(( SECS * 3 ))}; do
+  menus=$($CACHE/bin/wins Finder | awk '$3 == 101')
+  if [[ $(print -r -- "$menus" | grep -c .) -ge 2 ]]; then
+    sleep 1.2
+    menus=$($CACHE/bin/wins Finder | awk '$3 == 101'); [[ $(print -r -- "$menus" | grep -c .) -ge 2 ]] || continue
+    { $CACHE/bin/wins Finder | awk '$3 == 0 { print; exit }'; print -r -- "$menus"; } > $OUT/windows.txt
+    while read id rest; do screencapture -x -o -l $id $OUT/finder-$id.png; done < $OUT/windows.txt
+    print "captured into $OUT:"; command ls $OUT; exit 0
+  fi
+  sleep 0.33
+done
+print -u2 "timed out after ${SECS}s"; exit 1
