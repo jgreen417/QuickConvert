@@ -1,0 +1,63 @@
+#!/bin/zsh
+# quickconvert — install or remove the QuickConvert app and its Finder extension.
+#
+#   quickconvert setup [path/to/QuickConvert.app]   copy to ~/Applications, register, enable, relaunch Finder
+#   quickconvert uninstall                          remove the app, extension and Services entry
+#
+# Homebrew installs this command with the app it built; `quickconvert setup` then needs no arguments.
+set -euo pipefail
+
+BUNDLED_APP="@APP@"   # replaced by the Homebrew formula with the path of the app it built
+DEST=~/Applications/QuickConvert.app
+EXT_ID=io.github.jgreen417.quickconvert.findersync
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+
+usage() {
+  print "usage: quickconvert setup [path/to/QuickConvert.app]"
+  print "       quickconvert uninstall"
+}
+
+setup() {
+  local src=${1:-$BUNDLED_APP}
+  [[ $src == "@APP@" ]] && src="${0:A:h:h}/build/QuickConvert.app"
+  [[ -d $src ]] || { print -u2 "QuickConvert.app not found at $src"; exit 1; }
+  codesign --verify --deep --strict "$src" || { print -u2 "Signature check failed for $src"; exit 1; }
+
+  mkdir -p ~/Applications
+  pkill -x QuickConvert 2>/dev/null || true
+  # Stage next to the old copy and swap, so a failed copy never leaves you with nothing.
+  rm -rf $DEST.new $DEST.old
+  ditto "$src" $DEST.new
+  [[ -e $DEST ]] && mv $DEST $DEST.old
+  mv $DEST.new $DEST
+  rm -rf $DEST.old
+
+  $LSREGISTER -f $DEST
+  pluginkit -a $DEST/Contents/PlugIns/QuickConvertFinder.appex
+  pluginkit -e use -i $EXT_ID
+  /System/Library/CoreServices/pbs -update
+  # Finder can keep an older copy of the extension loaded until it restarts.
+  killall Finder 2>/dev/null || true
+
+  print "QuickConvert is installed in ~/Applications."
+  print "Right-click files in Finder and choose Convert to. In iCloud Drive, use Services › Convert with QuickConvert…"
+  [[ -x /Applications/LibreOffice.app/Contents/MacOS/soffice ]] ||
+    print "Optional: brew install --cask libreoffice  (Word, Excel, PowerPoint, Keynote, Numbers and → PDF)"
+}
+
+uninstall() {
+  pkill -x QuickConvert 2>/dev/null || true
+  pluginkit -e ignore -i $EXT_ID 2>/dev/null || true
+  [[ -d $DEST ]] && pluginkit -r $DEST/Contents/PlugIns/QuickConvertFinder.appex 2>/dev/null || true
+  $LSREGISTER -u $DEST 2>/dev/null || true
+  rm -rf $DEST
+  /System/Library/CoreServices/pbs -update
+  print "QuickConvert removed. Files you converted are left alone."
+}
+
+case ${1:-} in
+  setup) shift; setup "$@" ;;
+  uninstall) uninstall ;;
+  -h|--help|help|"") usage ;;
+  *) usage; exit 1 ;;
+esac

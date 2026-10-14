@@ -51,14 +51,24 @@ While it works, a menu-bar icon shows progress (a live percentage for audio and 
 
 ## Install
 
-**Requirements:** macOS 13 or later, Xcode command-line tools, and an Apple Development signing identity (a free Apple ID works). It also needs the conversion engines from [Homebrew](https://brew.sh):
+### Homebrew (recommended)
 
 ```bash
-brew install imagemagick ffmpeg poppler librsvg
-brew install --cask libreoffice   # optional: Word, Excel, PowerPoint, Keynote, Numbers, and anything → PDF
+brew install jgreen417/tap/quickconvert
+quickconvert setup
 ```
 
-Then build, sign, install to `~/Applications`, and enable the Finder extension:
+Homebrew builds QuickConvert on your Mac and installs the conversion engines (FFmpeg, ImageMagick, Poppler, librsvg) as dependencies. `quickconvert setup` copies the app to `~/Applications`, enables the Finder extension, and relaunches Finder. Run it again after `brew upgrade quickconvert`.
+
+For Word, Excel, PowerPoint, Keynote and Numbers files, and for converting anything to PDF, also install LibreOffice:
+
+```bash
+brew install --cask libreoffice
+```
+
+### From source
+
+You'll need macOS 13 or later, the Xcode command-line tools, and the engines above.
 
 ```bash
 git clone https://github.com/jgreen417/QuickConvert.git
@@ -66,7 +76,9 @@ cd QuickConvert
 ./build.sh
 ```
 
-If **Convert to** doesn't appear in Finder:
+`build.sh` signs with your Apple Development certificate if you have one, and ad-hoc otherwise. Either way works on your own Mac.
+
+### If Convert to doesn't appear
 
 1. Open **System Settings › General › Login Items & Extensions › Finder** and check QuickConvert is switched on.
 2. Relaunch Finder with `killall Finder`. Finder can keep using an older copy of the extension after a reinstall.
@@ -147,21 +159,23 @@ Extension/      Finder Sync extension (sandboxed): builds the menu, writes job f
 Shared/         Format catalog and job model used by both
 Tests/          End-to-end suites and fixture helpers
 Tools/          Icon and brand artwork generators
-build.sh        Build universal binaries, sign, install, register
-uninstall.sh    Remove the app, extension and Services entry
+bin/quickconvert  Installs (setup) or removes (uninstall) the app and Finder extension
+build.sh          Builds universal binaries and signs them; then runs quickconvert setup
+uninstall.sh      Same as quickconvert uninstall
 ```
 
 ## Uninstall
 
 ```bash
-./uninstall.sh
+quickconvert uninstall               # or ./uninstall.sh from a source checkout
+brew uninstall quickconvert          # if you installed with Homebrew
 ```
 
 Files you've converted are left alone.
 
 ## Known limits
 
-- Built and signed for your own Mac with an Apple Development certificate. Distributing it to others would need Developer ID signing and notarization.
+- QuickConvert is built on your own Mac (by Homebrew or `build.sh`), so it doesn't need Apple notarization. A prebuilt, downloadable app would need Developer ID signing and notarization.
 - Engines are found in `/opt/homebrew/bin`, `/usr/local/bin` or `/usr/bin`.
 - Folders aren't converted recursively. Select the files inside them instead.
 - Very long media jobs have no time limit. Use **Cancel All** if you change your mind.

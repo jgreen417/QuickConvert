@@ -11,21 +11,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Compiles the host app and the Finder extension for both architectures, exactly as build.sh does,
-      # minus code signing and installation (CI has no signing identity).
-      - name: Compile (arm64 + x86_64)
+      # The same build.sh users and the Homebrew formula run, ad-hoc signed (CI has no certificate).
+      - name: Build universal app (ad-hoc signed)
+        run: IDENTITY=- ./build.sh --no-install
+
+      - name: Check the bundle
         run: |
-          mkdir -p build
-          for arch in arm64 x86_64; do
-            swiftc -O -swift-version 5 -target $arch-apple-macos13.0 -module-name QuickConvert \
-              App/*.swift Shared/*.swift -o build/QuickConvert-$arch
-            swiftc -O -swift-version 5 -target $arch-apple-macos13.0 -module-name QuickConvertFinder -application-extension \
-              -Xlinker -e -Xlinker _NSExtensionMain -framework FinderSync \
-              Extension/*.swift Shared/*.swift -o build/QuickConvertFinder-$arch
-          done
-          lipo -create build/QuickConvert-{arm64,x86_64} -output build/QuickConvert
-          lipo -create build/QuickConvertFinder-{arm64,x86_64} -output build/QuickConvertFinder
-          lipo -archs build/QuickConvert build/QuickConvertFinder 2>/dev/null || { lipo -archs build/QuickConvert; lipo -archs build/QuickConvertFinder; }
+          codesign --verify --deep --strict --verbose=2 build/QuickConvert.app
+          codesign -d --entitlements - build/QuickConvert.app/Contents/PlugIns/QuickConvertFinder.appex | grep -q app-sandbox
+          lipo -archs build/QuickConvert.app/Contents/MacOS/QuickConvert
+          bin/quickconvert --help
 
       - name: Validate property lists
         run: plutil -lint App/Info.plist Extension/Info.plist Extension/Extension.entitlements
