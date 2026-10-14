@@ -42,7 +42,7 @@ enum Formats {
         return m
     }()
 
-    /// Every target in menu order. Menu item tags index into this list.
+    /// Every target. Menu item tags index into this list.
     static let allTargets = [
         "jpg", "png", "webp", "heic", "avif", "gif", "tiff", "bmp", "ico", "pdf",
         "mp4", "mov", "webm", "mkv",
@@ -67,7 +67,7 @@ enum Formats {
     }
 
     /// Targets valid for every selected file, minus formats they already are, in the first file's
-    /// natural order (so a video offers MP4 first, not GIF; the picker defaults to the first entry).
+    /// natural order, so the picker's default is the most common format for that type.
     static func commonTargets(for urls: [URL], office: Bool) -> [String] {
         guard let firstKind = urls.first.flatMap(kind(of:)) else { return [] }
         var common = Set(targets(for: firstKind, office: office))

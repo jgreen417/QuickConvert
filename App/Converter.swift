@@ -98,10 +98,10 @@ enum Converter {
             return try publish([(out, ".\(ext)")], for: input)
 
         case .text, .slides, .sheet:
-            // Protected documents are decrypted to a staged copy first (needs the password from the user).
+            // Protected documents are decrypted to a staged copy first. Legacy .doc/.xls/.ppt can't be
+            // checked up front, so for those a supplied password means "decrypt it".
             var doc = job.input
-            // Legacy .doc/.xls/.ppt can't be checked up front, so a supplied password means "decrypt it".
-            if try isEncrypted(input, srcExt) || (password != nil && ["doc", "xls", "ppt"].contains(srcExt)) {
+            if isEncrypted(input, srcExt) || (password != nil && ["doc", "xls", "ppt"].contains(srcExt)) {
                 doc = try decrypt(job, srcExt, password: password)
             }
 
@@ -151,9 +151,7 @@ enum Converter {
         let rtf = head.starts(with: Array("{\\rtf".utf8))
         let damaged = ConversionError("This file isn't a valid .\(srcExt) document. It may be damaged.")
         switch srcExt {
-        case "docx":
-            if !zip { throw damaged }
-        case "odt":
+        case "docx", "odt":
             if !zip { throw damaged }
         case "doc":
             // Word also saves RTF and HTML with a .doc name; textutil handles those fine.
@@ -166,7 +164,7 @@ enum Converter {
     }
 
     /// Encrypted OOXML is an OLE compound file instead of a zip; encrypted ODF lists encryption data in its manifest.
-    private static func isEncrypted(_ url: URL, _ srcExt: String) throws -> Bool {
+    private static func isEncrypted(_ url: URL, _ srcExt: String) -> Bool {
         switch srcExt {
         case "docx", "xlsx", "pptx":
             guard let handle = FileHandle(forReadingAtPath: url.path) else { return false }
@@ -229,7 +227,7 @@ enum Converter {
                 if rootStart < 0 { rootStart = u32(e + 0x74) } // first entry is the Root Entry
                 guard name == target else { continue }
                 let start = u32(e + 0x74), size = u32(e + 0x78)
-                var fib: Int
+                let fib: Int
                 if size < cutoff { // small streams live in the mini stream, inside the root's sectors
                     let offset = start * miniSize, rootChain = chain(rootStart)
                     guard offset / sectorSize < rootChain.count else { return false }

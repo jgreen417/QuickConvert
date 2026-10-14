@@ -1,7 +1,7 @@
 import Cocoa
 
 /// Background agent (no Dock icon). Entry points:
-/// - Finder Sync menu: quickconvert://job/<uuid>, job details read from the extension's container;
+/// - Finder Sync menu: quickconvert://job/<uuid>, job details read from Formats.jobsDirectory;
 /// - Services / Quick Actions "Convert with QuickConvert…", which works where Finder Sync doesn't (e.g. iCloud Drive);
 /// - files dropped on the app, or picked from its welcome window.
 /// Shows progress in the menu bar while working and quits once idle.
@@ -33,7 +33,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var progress: Double?
     }
     private var active: [Running] = []
-    private var cancelled = false
     private var statusItem: NSStatusItem?
     private var sawRequest = false
     private var modalDepth = 0
@@ -123,7 +122,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.informativeText = files.count == 1
             ? "The result is saved next to the original."
             : "\(describe(files)). Results are saved next to the originals."
-        // Labeled format control (also named for VoiceOver).
         let label = NSTextField(labelWithString: "Format:")
         label.frame = NSRect(x: 0, y: 4, width: 58, height: 18)
         let popup = NSPopUpButton(frame: NSRect(x: 62, y: 0, width: 190, height: 26), pullsDown: false)
@@ -192,19 +190,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         self.updateStatus()
                     }
                 }
-                do {
-                    // Input problems (missing file, unsupported pair) won't fix themselves, so they aren't offered for retry.
-                    do { try Converter.validate(file, to: ext) } catch {
-                        throw ConversionError("\(error.localizedDescription)", retryable: false)
+                // Input problems (missing file, unsupported pair) won't fix themselves, so they aren't offered for retry.
+                do { try Converter.validate(file, to: ext) } catch {
+                    outcome = .failed("\(name): \(error.localizedDescription)", retryable: false)
+                }
+                if outcome == nil {
+                    do { outcome = .converted(try Converter.convert(file, to: ext, password: password, progress: report)) }
+                    catch is CancelledError { outcome = .cancelled }
+                    catch let error as PasswordRequired { needsPassword = error }
+                    catch let error as ConversionError {
+                        outcome = .failed("\(name): \(Converter.friendlyMessage(error.message, fileName: name))", retryable: error.retryable)
                     }
-                    outcome = .converted(try Converter.convert(file, to: ext, password: password, progress: report))
+                    catch { outcome = .failed("\(name): \(Converter.friendlyMessage(error.localizedDescription, fileName: name))", retryable: true) }
                 }
-                catch is CancelledError { outcome = .cancelled }
-                catch let error as PasswordRequired { needsPassword = error }
-                catch let error as ConversionError {
-                    outcome = .failed("\(name): \(Converter.friendlyMessage(error.message, fileName: name))", retryable: error.retryable)
-                }
-                catch { outcome = .failed("\(name): \(Converter.friendlyMessage(error.localizedDescription, fileName: name))", retryable: true) }
             }
             DispatchQueue.main.async {
                 let label: String
@@ -250,7 +248,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func cancelAll() {
-        cancelled = true
         Converter.cancelAll()
     }
 
@@ -275,18 +272,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         cancel.target = self
         menu.addItem(cancel)
         statusItem?.menu = menu
-        // Test mode: where the menu-bar item is (top-left origin, points), for README screenshots.
-        if testLog != nil, let window = statusItem?.button?.window, let screen = window.screen {
-            let f = window.frame
-            log("status: \(Int(f.minX)) \(Int(screen.frame.maxY - f.maxY)) \(Int(f.width)) \(Int(f.height)) \(statusItem?.button?.title ?? "")")
-        }
     }
 
     private func finish() {
         if let item = statusItem { NSStatusBar.system.removeStatusItem(item) }
         statusItem = nil
         let batch = results
-        results = []; total = 0; done = 0; cancelled = false
+        results = []; total = 0; done = 0
 
         var outputs: [URL] = [], errors: [String] = [], again: [JobResult] = []
         var converted = 0, failed = 0, stopped = 0, skipped = 0
@@ -317,7 +309,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.informativeText = [(converted, "converted"), (failed, "failed"), (stopped, "cancelled"), (skipped, "skipped")]
             .filter { $0.0 > 0 }.map { "\($0.0) \($0.1)" }.joined(separator: " · ")
         if !errors.isEmpty {
-            // Every error, selectable for copying, instead of a truncated list.
             let text = NSTextView(frame: NSRect(x: 0, y: 0, width: 380, height: 10))
             text.string = errors.joined(separator: "\n\n")
             text.isEditable = false
