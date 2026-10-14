@@ -25,6 +25,7 @@ setup() {
   codesign --verify --deep --strict "$src" || { print -u2 "Signature check failed for $src"; exit 1; }
 
   mkdir -p ~/Applications
+  mkdir -p -m 700 ~/Library/Application\ Support/QuickConvert/Jobs   # Finder → app job handoff
   pkill -x QuickConvert 2>/dev/null || true
   # Stage next to the old copy and swap, so a failed copy never leaves you with nothing.
   rm -rf $DEST.new $DEST.old
@@ -34,10 +35,19 @@ setup() {
   rm -rf $DEST.old
 
   $LSREGISTER -f $DEST
-  pluginkit -a $DEST/Contents/PlugIns/QuickConvertFinder.appex
-  pluginkit -e use -i $EXT_ID
   /System/Library/CoreServices/pbs -update
+  # Register and enable, then wait until macOS reports it enabled ("+") before touching Finder:
+  # relaunching Finder while the registration is still settling can leave the menu missing.
+  local ok=""
+  for _ in {1..20}; do
+    pluginkit -a $DEST/Contents/PlugIns/QuickConvertFinder.appex 2>/dev/null
+    pluginkit -e use -i $EXT_ID 2>/dev/null
+    sleep 0.5
+    if pluginkit -m -i $EXT_ID 2>/dev/null | grep -q '^+'; then ok=1; break; fi
+  done
+  [[ -n $ok ]] || print -u2 "Warning: the Finder extension didn't register. Check System Settings › General › Login Items & Extensions › Finder."
   # Finder can keep an older copy of the extension loaded until it restarts.
+  pkill -f QuickConvertFinder.appex 2>/dev/null || true
   killall Finder 2>/dev/null || true
 
   print "QuickConvert is installed in ~/Applications."

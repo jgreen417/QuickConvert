@@ -85,10 +85,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleJob(_ url: URL) {
         guard url.scheme == Formats.urlScheme, url.host == "job",
               let id = UUID(uuidString: url.lastPathComponent) else { return }
-        let file = Formats.hostJobsDirectory.appendingPathComponent("\(id.uuidString).json")
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: file.path),
+        let file = Formats.jobsDirectory.appendingPathComponent("\(id.uuidString).json")
+        // Only a regular file you own, written in the last two minutes, and only once.
+        var st = stat()
+        guard lstat(file.path, &st) == 0, st.st_mode & S_IFMT == S_IFREG, st.st_uid == getuid(),
+              let attrs = try? FileManager.default.attributesOfItem(atPath: file.path),
               let data = try? Data(contentsOf: file) else { return }
-        try? FileManager.default.removeItem(at: file) // one use only
+        try? FileManager.default.removeItem(at: file)
         guard let modified = attrs[.modificationDate] as? Date, Date().timeIntervalSince(modified) < 120,
               let job = try? JSONDecoder().decode(Formats.Job.self, from: data) else { return }
         submit(job.files.map { URL(fileURLWithPath: $0) }, to: job.to)
@@ -323,6 +326,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 // Before the run loop starts: a file-open launch delivers its job before applicationDidFinishLaunching.
 Converter.removeStaleStaging()
+try? FileManager.default.createDirectory(at: Formats.jobsDirectory, withIntermediateDirectories: true,
+                                         attributes: [.posixPermissions: 0o700])
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate

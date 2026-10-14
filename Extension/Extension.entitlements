@@ -3,5 +3,8 @@
 <plist version="1.0">
 <dict>
 	<key>com.apple.security.app-sandbox</key><true/>
+	<!-- The one folder outside its container the extension may write: job handoff to the app. -->
+	<key>com.apple.security.temporary-exception.files.home-relative-path.read-write</key>
+	<array><string>/Library/Application Support/QuickConvert/Jobs/</string></array>
 </dict>
 </plist>

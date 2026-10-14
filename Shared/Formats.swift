@@ -11,16 +11,22 @@ enum Formats {
     static let extensionID = "io.github.jgreen417.quickconvert.findersync"
     static let maxFiles = 500
 
-    /// A Finder menu request. The extension writes it into its own sandbox container and sends only the
-    /// job's UUID in a quickconvert://job/<uuid> URL, so a link from a website or another app can't name files.
+    /// A Finder menu request. The extension writes it to `jobsDirectory` and sends only the job's UUID in a
+    /// quickconvert://job/<uuid> URL, so a link from a website or another app can't name files.
     struct Job: Codable {
         let to: String
         let files: [String]
     }
 
-    /// The extension's sandboxed Caches/Jobs, as seen from the unsandboxed host.
-    static var hostJobsDirectory: URL {
-        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Containers/\(extensionID)/Data/Library/Caches/Jobs")
+    /// ~/Library/Application Support/QuickConvert/Jobs, the one folder the sandboxed extension may write
+    /// (a home-relative sandbox exception) and the host reads. It works without a shared team ID, so
+    /// ad-hoc signed builds (Homebrew) behave like certificate-signed ones.
+    static let jobsSubpath = "Library/Application Support/QuickConvert/Jobs"
+
+    /// The real home folder. Inside the sandbox, NSHomeDirectory() points at the extension's container.
+    static var jobsDirectory: URL {
+        let home = getpwuid(getuid()).flatMap { String(validatingUTF8: $0.pointee.pw_dir) } ?? NSHomeDirectory()
+        return URL(fileURLWithPath: home).appendingPathComponent(jobsSubpath)
     }
 
     static let kinds: [String: Kind] = {

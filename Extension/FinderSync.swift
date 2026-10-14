@@ -41,10 +41,9 @@ final class FinderSync: FIFinderSync {
 
         let job = Formats.Job(to: Formats.allTargets[sender.tag], files: items.map(\.path))
         let id = UUID().uuidString
-        // Inside the sandbox this resolves to the extension's container, which the host reads.
-        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("Jobs")
+        let dir = Formats.jobsDirectory // created by the app and by `quickconvert setup`
         do {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             try JSONEncoder().encode(job).write(to: dir.appendingPathComponent("\(id).json"), options: .atomic)
         } catch {
             NSLog("QuickConvert: couldn't write job: \(error)")

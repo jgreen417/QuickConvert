@@ -119,14 +119,14 @@ QuickConvert keeps as much quality as the target format allows.
 - **Outputs are checked before they appear.** A result must exist, be non-empty, and (for PDFs) include every page. It's then moved into place with a rename that never replaces an existing file.
 - **Permissions carry over.** A private (`0600`) file produces a private output.
 - **Passwords aren't kept.** A document password is passed only to that one LibreOffice process, through its environment, and never saved or logged.
-- **Only you can start a conversion.** The Finder extension hands jobs over through its own sandboxed folder, and the `quickconvert://` link carries only a one-time ID. A link from a website or another app can't name files.
+- **Only you can start a conversion.** The sandboxed Finder extension hands each job over as a file in a private folder (`~/Library/Application Support/QuickConvert/Jobs`, readable only by you), and the `quickconvert://` link carries only a one-time ID. A link from a website can't create that file, and the app only accepts job files you own that were written in the last two minutes.
 - **Bad input is rejected up front:** missing files, folders, named pipes, unreadable files, damaged documents, and unsupported format pairs. Document engines are stopped if they stall, and **Cancel All** stops everything else.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    A["Finder<br/>right-click"] -->|sandboxed extension<br/>writes a job file| B["QuickConvert.app<br/>(menu bar)"]
+    A["Finder<br/>right-click"] -->|sandboxed extension<br/>writes a one-time job file| B["QuickConvert.app<br/>(menu bar)"]
     S["Services · drag & drop<br/>· file picker"] --> B
     B --> C["Private staging folder<br/>fixed names, 0700"]
     C --> D{"Engine"}
