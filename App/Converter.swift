@@ -2,7 +2,9 @@ import Foundation
 
 struct ConversionError: LocalizedError {
     let message: String
-    init(_ message: String) { self.message = message }
+    /// false when retrying can't help (missing input, unsupported format pair).
+    let retryable: Bool
+    init(_ message: String, retryable: Bool = true) { self.message = message; self.retryable = retryable }
     var errorDescription: String? { message }
 }
 
@@ -178,17 +180,26 @@ enum Converter {
         }
     }
 
+    /// Checks only the first 3 bytes; when there is a BOM, streams the rest into a new file in 1 MB chunks
+    /// instead of loading the whole export into memory.
     private static func stripByteOrderMark(_ url: URL) {
-        guard let data = try? Data(contentsOf: url), data.starts(with: [0xEF, 0xBB, 0xBF]) else { return }
-        try? data.dropFirst(3).write(to: url)
+        guard let input = FileHandle(forReadingAtPath: url.path) else { return }
+        defer { try? input.close() }
+        guard input.readData(ofLength: 3) == Data([0xEF, 0xBB, 0xBF]) else { return }
+        let trimmed = url.appendingPathExtension("trimmed")
+        guard FileManager.default.createFile(atPath: trimmed.path, contents: nil),
+              let output = FileHandle(forWritingAtPath: trimmed.path) else { return }
+        while case let chunk = input.readData(ofLength: 1 << 20), !chunk.isEmpty { output.write(chunk) }
+        try? output.close()
+        _ = try? FileManager.default.replaceItemAt(url, withItemAt: trimmed)
     }
 
     /// Reads the fEncrypted flag from a Word 97–2003 file. Walks the OLE compound file: FAT from the header's
     /// DIFAT, the directory chain to the "WordDocument" stream (in the mini stream when it's small), then
     /// checks the FIB: magic 0xA5EC at 0x00 and bit 8 of the flags word at 0x0A.
     private static func wordDocumentIsEncrypted(_ url: URL) -> Bool {
-        guard let data = try? Data(contentsOf: url, options: .alwaysMapped), data.count >= 512 else { return false }
-        let b = [UInt8](data)
+        // Memory-mapped and read in place: only the header, FAT and directory pages are touched.
+        guard let b = try? Data(contentsOf: url, options: .alwaysMapped), b.count >= 512 else { return false }
         func u16(_ o: Int) -> Int { o >= 0 && o + 1 < b.count ? Int(b[o]) | Int(b[o + 1]) << 8 : 0 }
         func u32(_ o: Int) -> Int { u16(o) | u16(o + 2) << 16 }
         let end = 0xFFFF_FFFA
@@ -375,17 +386,28 @@ enum Converter {
         }
     }
 
-    private static func probe(_ input: URL) -> (video: [String], audio: [String], duration: Double?) {
-        func query(_ extra: [String]) -> [String] {
-            let out = (try? run("ffprobe", ["-v", "error"] + extra + ["-of", "csv=p=0", input.path], timeout: 60)) ?? ""
-            return out.split(whereSeparator: \.isNewline)
-                .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " ,")) }
-                .filter { !$0.isEmpty }
+    private struct Probe: Decodable {
+        struct Stream: Decodable {
+            let codec_type: String?
+            let codec_name: String?
+            let disposition: [String: Int]?
         }
-        // "V" = video excluding attached pictures (cover art).
-        let video = query(["-select_streams", "V", "-show_entries", "stream=codec_name"])
-        let audio = query(["-select_streams", "a", "-show_entries", "stream=codec_name"])
-        let duration = query(["-show_entries", "format=duration"]).first.flatMap(Double.init).flatMap { $0 > 0 ? $0 : nil }
+        struct Format: Decodable { let duration: String? }
+        let streams: [Stream]?
+        let format: Format?
+    }
+
+    /// One ffprobe call for codecs and duration. Cover art shows up as an attached-picture video stream,
+    /// which is excluded from the video list.
+    private static func probe(_ input: URL) -> (video: [String], audio: [String], duration: Double?) {
+        let json = (try? run("ffprobe", ["-v", "error", "-of", "json", "-show_entries",
+                                         "stream=codec_type,codec_name:stream_disposition=attached_pic:format=duration",
+                                         input.path], timeout: 60)) ?? ""
+        guard let p = try? JSONDecoder().decode(Probe.self, from: Data(json.utf8)) else { return ([], [], nil) }
+        let streams = p.streams ?? []
+        let video = streams.filter { $0.codec_type == "video" && $0.disposition?["attached_pic"] != 1 }.compactMap(\.codec_name)
+        let audio = streams.filter { $0.codec_type == "audio" }.compactMap(\.codec_name)
+        let duration = p.format?.duration.flatMap(Double.init).flatMap { $0 > 0 ? $0 : nil }
         return (video, audio, duration)
     }
 
@@ -499,6 +521,16 @@ enum Converter {
         for name in (try? FileManager.default.contentsOfDirectory(atPath: tmp.path)) ?? [] where name.hasPrefix("QuickConvert-") {
             try? FileManager.default.removeItem(at: tmp.appendingPathComponent(name))
         }
+    }
+
+    /// Engine errors mention the private staging paths (`…/QuickConvert-<uuid>/src/in.png`). Show the user's
+    /// file name instead, and drop other staging paths, so messages are readable and don't expose temp folders.
+    static func friendlyMessage(_ message: String, fileName: String) -> String {
+        let staging = #"(?:/private)?/[^\s'"`]*?/QuickConvert-[0-9A-F-]{36}"#
+        var out = message.replacingOccurrences(of: staging + #"/src/(?:in|plain)\.[A-Za-z0-9]+"#, with: fileName,
+                                               options: .regularExpression)
+        out = out.replacingOccurrences(of: staging + #"[^\s'"`]*"#, with: "(temporary file)", options: .regularExpression)
+        return out
     }
 
     static func cancelAll() {

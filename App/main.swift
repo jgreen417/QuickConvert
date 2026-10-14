@@ -13,7 +13,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }()
     private var total = 0
     private var done = 0
-    private var failures: [String] = []
+
+    /// What happened to each file in the current batch; the end-of-batch summary is built from these.
+    private enum Outcome {
+        case converted([URL])
+        case failed(String, retryable: Bool)
+        case cancelled
+        case skipped // password prompt dismissed with Skip
+    }
+    private struct JobResult {
+        let file: URL
+        let ext: String
+        let outcome: Outcome
+    }
+    private var results: [JobResult] = []
     private struct Running {
         let id: UUID
         let name: String
@@ -107,15 +120,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         alert.messageText = files.count == 1 ? "Convert \(files[0].lastPathComponent)" : "Convert \(files.count) files"
-        alert.informativeText = "Results are saved next to the originals."
-        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 220, height: 26), pullsDown: false)
+        alert.informativeText = files.count == 1
+            ? "The result is saved next to the original."
+            : "\(describe(files)). Results are saved next to the originals."
+        // Labeled format control (also named for VoiceOver).
+        let label = NSTextField(labelWithString: "Format:")
+        label.frame = NSRect(x: 0, y: 4, width: 58, height: 18)
+        let popup = NSPopUpButton(frame: NSRect(x: 62, y: 0, width: 190, height: 26), pullsDown: false)
         popup.addItems(withTitles: targets.map(Formats.label))
-        alert.accessoryView = popup
+        popup.setAccessibilityLabel("Output format")
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 252, height: 26))
+        accessory.addSubview(label)
+        accessory.addSubview(popup)
+        alert.accessoryView = accessory
         alert.addButton(withTitle: "Convert")
         alert.addButton(withTitle: "Cancel")
         if runModal(alert) == .alertFirstButtonReturn {
             submit(files, to: targets[popup.indexOfSelectedItem])
         }
+    }
+
+    /// "2 images and 1 video" for the picker.
+    private func describe(_ files: [URL]) -> String {
+        let names: [(Kind, String, String)] = [
+            (.image, "image", "images"), (.svg, "SVG", "SVGs"), (.pdf, "PDF", "PDFs"), (.video, "video", "videos"),
+            (.audio, "audio file", "audio files"), (.text, "document", "documents"),
+            (.slides, "presentation", "presentations"), (.sheet, "spreadsheet", "spreadsheets"),
+        ]
+        let parts = names.compactMap { kind, one, many -> String? in
+            let n = files.filter { Formats.kind(of: $0) == kind }.count
+            return n == 0 ? nil : "\(n) \(n == 1 ? one : many)"
+        }
+        return parts.count > 1 ? parts.dropLast().joined(separator: ", ") + " and " + parts.last! : parts.first ?? "\(files.count) files"
     }
 
     private func submit(_ files: [URL], to ext: String) {
@@ -140,10 +176,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let name = file.lastPathComponent
         let id = UUID()
         queue.addOperation {
-            var failure: String?
+            var outcome: Outcome?
             var needsPassword: PasswordRequired?
-            var wasCancelled = Converter.generation != generation
-            if !wasCancelled {
+            if Converter.generation != generation {
+                outcome = .cancelled
+            } else {
                 DispatchQueue.main.async { self.active.append(Running(id: id, name: name)); self.updateStatus() }
                 var lastShown = -1
                 let report = { (fraction: Double) in
@@ -155,17 +192,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         self.updateStatus()
                     }
                 }
-                do { try Converter.convert(file, to: ext, password: password, progress: report) }
-                catch is CancelledError { wasCancelled = true }
+                do {
+                    // Input problems (missing file, unsupported pair) won't fix themselves, so they aren't offered for retry.
+                    do { try Converter.validate(file, to: ext) } catch {
+                        throw ConversionError("\(error.localizedDescription)", retryable: false)
+                    }
+                    outcome = .converted(try Converter.convert(file, to: ext, password: password, progress: report))
+                }
+                catch is CancelledError { outcome = .cancelled }
                 catch let error as PasswordRequired { needsPassword = error }
-                catch { failure = "\(name): \(error.localizedDescription)" }
+                catch let error as ConversionError {
+                    outcome = .failed("\(name): \(Converter.friendlyMessage(error.message, fileName: name))", retryable: error.retryable)
+                }
+                catch { outcome = .failed("\(name): \(Converter.friendlyMessage(error.localizedDescription, fileName: name))", retryable: true) }
             }
             DispatchQueue.main.async {
-                let outcome = wasCancelled ? "cancelled" : needsPassword.map { $0.wrong ? "wrong password" : "needs password" } ?? (failure == nil ? "ok" : "failed")
-                self.log("finished: \(name) \(outcome)")
+                let label: String
+                switch outcome {
+                case .converted: label = "ok"
+                case .failed: label = "failed"
+                case .cancelled: label = "cancelled"
+                case .skipped: label = "skipped"
+                case nil: label = needsPassword?.wrong == true ? "wrong password" : "needs password"
+                }
+                self.log("finished: \(name) \(label)")
                 self.active.removeAll { $0.id == id }
                 self.done += 1
-                if let failure { self.failures.append(failure) }
+                if let outcome { self.results.append(JobResult(file: file, ext: ext, outcome: outcome)) }
                 // Ask before the idle check below, so a retry is queued before the app could decide it's done.
                 if let needsPassword { self.askPassword(for: file, to: ext, wrong: needsPassword.wrong, attempt: attempt) }
                 self.updateStatus()
@@ -177,19 +230,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func askPassword(for file: URL, to ext: String, wrong: Bool, attempt: Int) {
         let name = file.lastPathComponent
         guard attempt < 3 else {
-            failures.append("\(name): Incorrect password")
+            results.append(JobResult(file: file, ext: ext, outcome: .failed("\(name): Incorrect password", retryable: true)))
             return
         }
         let alert = NSAlert()
         alert.messageText = wrong ? "Incorrect password for “\(name)”" : "“\(name)” is password-protected"
         alert.informativeText = "Enter its password to convert it. QuickConvert uses it only for this conversion and doesn't save it."
         let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        field.setAccessibilityLabel("Password for \(name)")
         alert.accessoryView = field
         alert.addButton(withTitle: "Convert")
         alert.addButton(withTitle: "Skip")
         alert.window.initialFirstResponder = field
         if runModal(alert) == .alertFirstButtonReturn, !field.stringValue.isEmpty {
             enqueue(file, ext, password: field.stringValue, attempt: attempt + 1)
+        } else {
+            results.append(JobResult(file: file, ext: ext, outcome: .skipped))
         }
     }
 
@@ -210,6 +266,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             statusItem?.button?.title = active.first.map { r in r.progress.map { " \(Int($0 * 100))%" } ?? "" } ?? ""
         }
+        statusItem?.button?.setAccessibilityLabel("QuickConvert: \(done) of \(total) conversions done")
         let menu = NSMenu()
         menu.addItem(withTitle: "\(done) of \(total) done", action: nil, keyEquivalent: "")
         for r in active.prefix(5) { menu.addItem(withTitle: "Converting \(r.name)\(percent(r))", action: nil, keyEquivalent: "") }
@@ -228,18 +285,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func finish() {
         if let item = statusItem { NSStatusBar.system.removeStatusItem(item) }
         statusItem = nil
-        let errors = failures, wasCancelled = cancelled
-        total = 0; done = 0; failures = []; cancelled = false
+        let batch = results
+        results = []; total = 0; done = 0; cancelled = false
 
-        if !errors.isEmpty {
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            alert.messageText = errors.count == 1 ? "Conversion failed" : "\(errors.count) conversions failed"
-            alert.informativeText = errors.prefix(10).joined(separator: "\n\n") + (errors.count > 10 ? "\n\n…and \(errors.count - 10) more" : "")
-            runModal(alert)
-        } else if !wasCancelled {
-            NSSound(named: "Glass")?.play()
+        var outputs: [URL] = [], errors: [String] = [], again: [JobResult] = []
+        var converted = 0, failed = 0, stopped = 0, skipped = 0
+        for r in batch {
+            switch r.outcome {
+            case .converted(let urls): converted += 1; outputs += urls
+            case .failed(let message, let retryable): failed += 1; errors.append(message); if retryable { again.append(r) }
+            case .cancelled: stopped += 1; again.append(r)
+            case .skipped: skipped += 1
+            }
         }
+        log("summary: converted=\(converted) failed=\(failed) cancelled=\(stopped) skipped=\(skipped)")
+
+        guard failed + stopped > 0 else {
+            if converted > 0 { NSSound(named: "Glass")?.play() }
+            scheduleQuitIfIdle()
+            return
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = failed > 0 ? .warning : .informational
+        let n = batch.count
+        if failed > 0 {
+            alert.messageText = failed == n ? (n == 1 ? "Conversion failed" : "\(n) conversions failed") : "\(failed) of \(n) conversions failed"
+        } else {
+            alert.messageText = stopped == n ? (n == 1 ? "Conversion cancelled" : "\(n) conversions cancelled") : "\(stopped) of \(n) conversions cancelled"
+        }
+        alert.informativeText = [(converted, "converted"), (failed, "failed"), (stopped, "cancelled"), (skipped, "skipped")]
+            .filter { $0.0 > 0 }.map { "\($0.0) \($0.1)" }.joined(separator: " · ")
+        if !errors.isEmpty {
+            // Every error, selectable for copying, instead of a truncated list.
+            let text = NSTextView(frame: NSRect(x: 0, y: 0, width: 380, height: 10))
+            text.string = errors.joined(separator: "\n\n")
+            text.isEditable = false
+            text.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            text.textContainerInset = NSSize(width: 4, height: 4)
+            text.isVerticallyResizable = true
+            text.autoresizingMask = [.width]
+            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 380, height: min(160, CGFloat(40 + errors.count * 34))))
+            scroll.documentView = text
+            scroll.hasVerticalScroller = true
+            scroll.borderType = .bezelBorder
+            scroll.setAccessibilityLabel("Errors")
+            alert.accessoryView = scroll
+        }
+        alert.addButton(withTitle: "OK")
+        var actions: [() -> Void] = [{}]
+        if !outputs.isEmpty {
+            alert.addButton(withTitle: outputs.count == 1 ? "Show Converted File" : "Show Converted Files")
+            actions.append { [self] in
+                log("reveal: \(outputs.map(\.lastPathComponent).joined(separator: ", "))")
+                if testDwell == nil { NSWorkspace.shared.activateFileViewerSelecting(outputs) }
+            }
+        }
+        if !again.isEmpty {
+            alert.addButton(withTitle: again.count == 1 ? "Try Again" : "Try \(again.count) Again")
+            actions.append { [self] in
+                log("retry: \(again.map(\.file.lastPathComponent).joined(separator: ", "))")
+                quitTimer?.invalidate()
+                for r in again { enqueue(r.file, r.ext) }
+            }
+        }
+        // Test mode: QC_TEST_SUMMARY_ANSWER=show|retry picks that button instead of OK.
+        let wanted = ProcessInfo.processInfo.environment["QC_TEST_SUMMARY_ANSWER"]
+        let titles = alert.buttons.map(\.title)
+        let index = titles.firstIndex { t in (wanted == "show" && t.hasPrefix("Show")) || (wanted == "retry" && t.hasPrefix("Try")) } ?? 0
+        let response = runModal(alert, testAnswer: NSApplication.ModalResponse(rawValue: NSApplication.ModalResponse.alertFirstButtonReturn.rawValue + index))
+        let chosen = response.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+        if actions.indices.contains(chosen) { actions[chosen]() }
         scheduleQuitIfIdle()
     }
 

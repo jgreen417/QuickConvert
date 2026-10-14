@@ -36,7 +36,7 @@
 - **Universal app** for Apple silicon and Intel, built with Swift and AppKit, with no third-party Swift dependencies.
 
 <p align="center">
-  <img src="docs/dialogs.png" alt="The format picker, the password prompt, and the welcome window" width="92%">
+  <img src="docs/dialogs.png" alt="The format picker, the password prompt, and the batch results summary" width="92%">
 </p>
 
 ## Ways to convert
@@ -47,7 +47,7 @@
 | iCloud Drive and other cloud folders | Right-click › **Services › Convert with QuickConvert…** |
 | Anywhere | Drop files on QuickConvert.app, or open it and click **Choose Files…** |
 
-While it works, a menu-bar icon shows progress (a live percentage for audio and video) with a **Cancel All** item. It chimes when done, explains anything that failed, and quits when idle.
+While it works, a menu-bar icon shows progress (a live percentage for audio and video) with a **Cancel All** item. When everything converts, it chimes and quits. If anything fails or you cancel, a summary shows exact counts (converted, failed, cancelled, skipped) and every error in full, with **Show Converted Files** and **Try Again** for the files worth retrying.
 
 ## Install
 
@@ -144,12 +144,12 @@ The **Finder extension** is sandboxed, as macOS requires, so it can't write next
 
 ```bash
 Tests/run.sh         # 79 converter checks through the real engines
-Tests/lifecycle.sh   # 24 app checks against the installed app (run after ./build.sh)
+Tests/lifecycle.sh   # 30 app checks against the installed app (run after ./build.sh)
 QC_ARCH=x86_64 Tests/run.sh   # the same, as Intel code under Rosetta
 ```
 
 - **`run.sh`** generates its own sample files and covers every format family, LibreOffice and Keynote, password-protected and damaged documents, concurrency, stream preservation, the safety rules above, and APFS, HFS+, exFAT and FAT32 volumes.
-- **`lifecycle.sh`** drives the real app through jobs arriving while a dialog is open, long jobs, Cancel All, password prompts, forged links, and rejections. It uses a test mode that only a local `open --env` launch can enable.
+- **`lifecycle.sh`** drives the real app through jobs arriving while a dialog is open, long jobs, Cancel All, password prompts, batch summaries with Show and Try Again, forged links, and rejections. It uses a test mode that only a local `open --env` launch can enable.
 
 ## Project layout
 

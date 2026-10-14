@@ -24,7 +24,8 @@ wait_quit() { wait_for '^quit$' && { for _ in {1..30}; do pgrep -x QuickConvert 
 before() { local a b; a=$(grep -n -m1 -- "$1" $LOG | cut -d: -f1); b=$(grep -n -m1 -- "$2" $LOG | cut -d: -f1); [[ -n $a && -n $b && $a -lt $b ]]; }
 
 cd $W
-magick -size 64x48 plasma:fractal -depth 8 photo.png; cp photo.png second.png; cp photo.png third.png
+magick -size 64x48 plasma:fractal -depth 8 photo.png; cp photo.png second.png; cp photo.png third.png; cp photo.png good.png
+printf 'not an image' > bad.png; printf 'not an image' > flaky.png
 printf 'not an image' > broken.png
 ffmpeg -loglevel error -f lavfi -i testsrc2=d=30:s=1920x1080:r=30 -c:v prores big.mov
 ffmpeg -loglevel error -f lavfi -i sine=d=1 song.mp3
@@ -63,7 +64,17 @@ rm -f big.mp4
 EXTRA_ENV="--env QC_TEST_CANCEL_AFTER=3" start 0.5 big.mov
 check "job reports cancelled, no error dialog" 'wait_for "^finished: big.mov cancelled$" && ! grep -q "^dialog: Conversion failed" $LOG'
 check "ffmpeg stopped, nothing written"        'wait_quit && ! pgrep -f "QuickConvert-.*/src/in.mov" >/dev/null && [[ ! -e big.mp4 ]]'
+check "cancellation summary with counts"     'grep -q "^summary: converted=0 failed=0 cancelled=1" $LOG && grep -q "^dialog: Conversion cancelled$" $LOG'
 check "staging cleaned up"                     '[[ -z "$(find ${TMPDIR:-/tmp} -maxdepth 1 -name "QuickConvert-*" 2>/dev/null)" ]]'
+
+print "— Batch results"
+EXTRA_ENV="--env QC_TEST_SUMMARY_ANSWER=show" start 1 good.png bad.png
+check "mixed batch: '1 of 2 conversions failed'" 'wait_for "^dialog: 1 of 2 conversions failed$" && grep -q "^summary: converted=1 failed=1 cancelled=0" $LOG'
+check "Show Converted Files reveals the output"  'wait_for "^reveal: good.jpg$" && wait_quit'
+EXTRA_ENV="--env QC_TEST_SUMMARY_ANSWER=retry" start 4 flaky.png
+wait_for "^dialog: Conversion failed$"; cp photo.png flaky.png         # the problem gets fixed while the summary is open
+check "Try Again re-runs the failed file"        'wait_for "^retry: flaky.png$" && wait_for "^finished: flaky.png ok$" && [[ -s flaky.jpg ]]'
+check "…and the second batch ends cleanly"       'wait_for "^summary: converted=1 failed=0" && wait_quit'
 
 print "— Password-protected documents"
 EXTRA_ENV="--env QC_TEST_PASSWORDS=nope,pw" start 1 prot/locked.docx
@@ -71,6 +82,8 @@ check "asks for the password"                 'wait_for "^dialog: “locked.docx
 check "wrong password → asks again"           'wait_for "^dialog: Incorrect password for “locked.docx”$"'
 check "right password → converted"            'wait_for "^finished: locked.docx ok$" && wait_quit && [[ "$(pdftotext prot/locked.pdf - 2>/dev/null)" == *"Top secret memo"* ]]'
 check "no error dialog along the way"         '! grep -q "^dialog: Conversion failed" $LOG'
+start 1 prot/locked.odt
+check "empty password = skipped, no error"    'wait_for "^summary: converted=0 failed=0 cancelled=0 skipped=1$" && wait_quit && ! grep -q "^dialog: Conversion failed" $LOG'
 EXTRA_ENV="--env QC_TEST_PASSWORDS=a,b,c" start 1 prot/locked.xlsx
 check "3 wrong passwords → stops with error"  'wait_for "^dialog: Conversion failed$" && wait_quit && [[ $(grep -c "^dialog: Incorrect password" $LOG) == 2 && ! -e "prot/locked 2.pdf" ]]'
 
