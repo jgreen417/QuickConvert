@@ -24,7 +24,7 @@
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.joshgreen.quickconvert</string>
+	<string>io.github.jgreen417.quickconvert</string>
 	<key>CFBundleName</key>
 	<string>QuickConvert</string>
 	<key>CFBundlePackageType</key>

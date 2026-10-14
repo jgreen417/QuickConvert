@@ -8,7 +8,7 @@ enum Kind {
 enum Formats {
     static let libreOffice = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
     static let urlScheme = "quickconvert"
-    static let extensionID = "com.joshgreen.quickconvert.findersync"
+    static let extensionID = "io.github.jgreen417.quickconvert.findersync"
     static let maxFiles = 500
 
     /// A Finder menu request. The extension writes it into its own sandbox container and sends only the

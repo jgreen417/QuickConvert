@@ -44,7 +44,7 @@ rm -rf $DEST.old
 
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f $DEST
 pluginkit -a $DEST/Contents/PlugIns/QuickConvertFinder.appex
-pluginkit -e use -i com.joshgreen.quickconvert.findersync
+pluginkit -e use -i io.github.jgreen417.quickconvert.findersync
 /System/Library/CoreServices/pbs -update  # pick up the Services menu entry
 echo "Installed $DEST"
-pluginkit -m -v -i com.joshgreen.quickconvert.findersync
+pluginkit -m -v -i io.github.jgreen417.quickconvert.findersync
