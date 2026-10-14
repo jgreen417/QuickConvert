@@ -19,6 +19,10 @@
   choose a format, and the result appears right next to the original. Everything runs on your Mac.
 </p>
 
+<p align="center">
+  <img src="docs/finder-menu.png" alt="Finder's right-click menu showing QuickConvert's Convert to submenu with JPEG, PNG, WebP, AVIF, GIF, TIFF, BMP, ICO and PDF" width="80%">
+</p>
+
 ---
 
 ## Highlights
@@ -62,7 +66,10 @@ cd QuickConvert
 ./build.sh
 ```
 
-If **Convert to** doesn't appear in Finder, open **System Settings › General › Login Items & Extensions › Finder** and switch QuickConvert on.
+If **Convert to** doesn't appear in Finder:
+
+1. Open **System Settings › General › Login Items & Extensions › Finder** and check QuickConvert is switched on.
+2. Relaunch Finder with `killall Finder`. Finder can keep using an older copy of the extension after a reinstall.
 
 ## Formats
 
