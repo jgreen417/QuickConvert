@@ -58,7 +58,7 @@ brew install jgreen417/tap/quickconvert
 quickconvert setup
 ```
 
-Homebrew builds QuickConvert on your Mac and installs the conversion engines (FFmpeg, ImageMagick, Poppler, librsvg) as dependencies. `quickconvert setup` copies the app to `~/Applications`, enables the Finder extension, and relaunches Finder. Run it again after `brew upgrade quickconvert`.
+Homebrew builds QuickConvert on your Mac and installs the conversion engines (FFmpeg, ImageMagick, Poppler, librsvg) as dependencies. OpenEXR input needs the `imagemagick-full` formula, which QuickConvert uses automatically when it's linked. `quickconvert setup` copies the app to `~/Applications`, enables the Finder extension, and relaunches Finder. Run it again after `brew upgrade quickconvert`.
 
 For Word, Excel, PowerPoint, Keynote and Numbers files, and for converting anything to PDF, also install LibreOffice:
 

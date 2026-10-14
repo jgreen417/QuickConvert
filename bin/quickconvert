@@ -19,7 +19,8 @@ usage() {
 
 setup() {
   local src=${1:-$BUNDLED_APP}
-  [[ $src == "@APP@" ]] && src="${0:A:h:h}/build/QuickConvert.app"
+  # Split so the formula's inreplace of the placeholder can't rewrite this check too.
+  [[ $src == "@""APP@" ]] && src="${0:A:h:h}/build/QuickConvert.app"
   [[ -d $src ]] || { print -u2 "QuickConvert.app not found at $src"; exit 1; }
   codesign --verify --deep --strict "$src" || { print -u2 "Signature check failed for $src"; exit 1; }
 
