@@ -215,6 +215,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         cancel.target = self
         menu.addItem(cancel)
         statusItem?.menu = menu
+        // Test mode: where the menu-bar item is (top-left origin, points), for README screenshots.
+        if testLog != nil, let window = statusItem?.button?.window, let screen = window.screen {
+            let f = window.frame
+            log("status: \(Int(f.minX)) \(Int(screen.frame.maxY - f.maxY)) \(Int(f.width)) \(Int(f.height)) \(statusItem?.button?.title ?? "")")
+        }
     }
 
     private func finish() {
@@ -279,7 +284,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.informativeText = (enabled
             ? "Right-click files in Finder and choose Convert to."
             : "The Finder extension is off, so Convert to won't appear in Finder's right-click menu.")
-            + "\n\nWhere that menu isn't available (like iCloud Drive), use Quick Actions › Convert with QuickConvert…, drop files on this app, or choose them here."
+            + "\n\nWhere that menu isn't available (like iCloud Drive), right-click › Services › Convert with QuickConvert…, drop files on this app, or choose them here."
         alert.addButton(withTitle: "Choose Files…")
         alert.addButton(withTitle: enabled ? "Done" : "Enable Finder Extension")
         let response = runModal(alert, testAnswer: .alertSecondButtonReturn)
